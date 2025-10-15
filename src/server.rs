@@ -7,6 +7,8 @@ use iroh::{
 };
 use n0_snafu::{Result, ResultExt};
 use std::sync::Arc;
+use std::io::Write as IoWrite;
+use std::path::Path;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{ClientMessage, ServerMessage, ALPN};
 use arboard::Clipboard;
@@ -44,23 +46,30 @@ pub async fn run_server() -> Result<()> {
     let connection_string = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(addr_json.as_bytes());
 
-    // Build the full connection command
-    let connection_command = format!("kerr connect {}", connection_string);
+    // Build the connection commands
+    let connect_command = format!("kerr connect {}", connection_string);
+    let send_command = format!("kerr send {}", connection_string);
+    let pull_command = format!("kerr pull {}", connection_string);
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Kerr Server Online                        ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-    println!("Connection command:");
-    println!("\n  {}\n", connection_command);
-    println!("─────────────────────────────────────────────────────────────────");
-    println!("Press 'c' to copy to clipboard | Ctrl+C to stop server");
+    println!("Commands:");
+    println!("  Connect: {}", connect_command);
+    println!("  Send:    {} <local> <remote>", send_command);
+    println!("  Pull:    {} <remote> <local>", pull_command);
+    println!("\n─────────────────────────────────────────────────────────────────");
+    println!("Keys: [c]onnect | [s]end | [p]ull | Ctrl+C to stop");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
     enable_raw_mode().unwrap_or_else(|err| eprintln!("Failed to enable raw mode: {err}"));
 
     // Spawn task to handle keyboard events
-    let connection_command_clone = connection_command.clone();
+    let connect_clone = connect_command.clone();
+    let send_clone = send_command.clone();
+    let pull_clone = pull_command.clone();
+
     let keyboard_task = tokio::task::spawn(async move {
         let mut event_stream = EventStream::new();
 
@@ -69,12 +78,42 @@ pub async fn run_server() -> Result<()> {
                 match event_result {
                     Ok(Event::Key(key_event)) => {
                         match (key_event.code, key_event.modifiers, key_event.kind) {
-                            // Handle 'c' key press to copy to clipboard
+                            // Handle 'c' key press to copy connect command
                             (KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press) => {
                                 match Clipboard::new() {
                                     Ok(mut clipboard) => {
-                                        if clipboard.set_text(&connection_command_clone).is_ok() {
-                                            println!("\r\n✓ Connection command copied to clipboard!\r\n");
+                                        if clipboard.set_text(&connect_clone).is_ok() {
+                                            println!("\r\n✓ Connect command copied to clipboard!\r\n");
+                                        } else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 's' key press to copy send command
+                            (KeyCode::Char('s'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&send_clone).is_ok() {
+                                            println!("\r\n✓ Send command copied to clipboard!\r\n");
+                                        } else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 'p' key press to copy pull command
+                            (KeyCode::Char('p'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&pull_clone).is_ok() {
+                                            println!("\r\n✓ Pull command copied to clipboard!\r\n");
                                         } else {
                                             eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
                                         }
@@ -128,8 +167,57 @@ impl ProtocolHandler for KerrServer {
         println!("\r\nAccepted connection from {node_id}\r");
 
         // Accept a bi-directional stream
-        let (mut send, mut recv) = connection.accept_bi().await?;
+        let (send, mut recv) = connection.accept_bi().await?;
 
+        // Read the Hello message to determine session type
+        let config = bincode::config::standard();
+        let mut len_bytes = [0u8; 4];
+        if recv.read_exact(&mut len_bytes).await.is_err() {
+            eprintln!("\r\nFailed to read Hello message length\r");
+            return Ok(());
+        }
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let mut msg_bytes = vec![0u8; len];
+        if recv.read_exact(&mut msg_bytes).await.is_err() {
+            eprintln!("\r\nFailed to read Hello message\r");
+            return Ok(());
+        }
+
+        let hello_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+            Ok((m, _)) => m,
+            Err(e) => {
+                eprintln!("\r\nFailed to deserialize Hello message: {}\r", e);
+                return Ok(());
+            }
+        };
+
+        let session_type = match hello_msg {
+            crate::ClientMessage::Hello { session_type } => session_type,
+            _ => {
+                eprintln!("\r\nExpected Hello message, got something else\r");
+                return Ok(());
+            }
+        };
+
+        match session_type {
+            crate::SessionType::Shell => {
+                println!("\r\nStarting shell session for {node_id}\r");
+                Self::handle_shell_session(node_id, send, recv).await
+            }
+            crate::SessionType::FileTransfer => {
+                println!("\r\nStarting file transfer session for {node_id}\r");
+                Self::handle_file_transfer_session(node_id, send, recv).await
+            }
+        }
+    }
+}
+
+impl KerrServer {
+    async fn handle_shell_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
         // Create a PTY system
         let pty_system = native_pty_system();
 
@@ -245,6 +333,7 @@ impl ProtocolHandler for KerrServer {
 
         // Main loop: receive from client and write to PTY, or exit if PTY ends
         let config = bincode::config::standard();
+
         loop {
             tokio::select! {
                 // Check if PTY has ended (bash exited)
@@ -311,6 +400,9 @@ impl ProtocolHandler for KerrServer {
                                     println!("\r\nClient requested disconnect\r");
                                     break;
                                 }
+                                _ => {
+                                    eprintln!("\r\nUnexpected message type in shell session\r");
+                                }
                             }
                         }
                         None => {
@@ -327,8 +419,223 @@ impl ProtocolHandler for KerrServer {
         send_task.abort();
         println!("\r\nConnection closed for {node_id}\r");
 
-        // Wait until the remote closes the connection
-        connection.closed().await;
+        Ok(())
+    }
+
+    async fn handle_file_transfer_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        let config = bincode::config::standard();
+
+        // Channel to coordinate sending data back to client
+        let (send_tx, mut send_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Spawn task to write messages to send stream
+        let send_task = tokio::spawn(async move {
+            while let Some(data) = send_rx.recv().await {
+                if send.write_all(&data).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // File upload state
+        let mut upload_file: Option<std::fs::File> = None;
+        let mut upload_path: Option<String> = None;
+
+        // Main loop: receive from client and handle file transfer messages
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message data
+            let mut msg_bytes = vec![0u8; len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                break;
+            }
+
+            // Deserialize message
+            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok((m, _)) => m,
+                Err(e) => {
+                    eprintln!("\r\nFailed to deserialize message: {}\r", e);
+                    continue;
+                }
+            };
+
+            match msg {
+                crate::ClientMessage::StartUpload { path, size, is_dir, force } => {
+                    println!("\r\nReceiving file upload: {} ({} bytes, is_dir: {}, force: {})\r", path, size, is_dir, force);
+
+                    // Check if path is an existing directory - this is an error
+                    let file_path = Path::new(&path);
+
+                    // If not force mode and file exists, ask for confirmation
+                    if !force && file_path.exists() && !file_path.is_dir() {
+                        let prompt_msg = crate::ServerMessage::ConfirmPrompt {
+                            message: format!("File '{}' already exists. Overwrite?", path),
+                        };
+                        if let Ok(encoded) = bincode::encode_to_vec(&prompt_msg, config) {
+                            let len = (encoded.len() as u32).to_be_bytes();
+                            let mut full_msg = Vec::new();
+                            full_msg.extend_from_slice(&len);
+                            full_msg.extend_from_slice(&encoded);
+                            let _ = send_tx.send(full_msg);
+                        }
+
+                        // Wait for confirmation response
+                        let mut len_bytes = [0u8; 4];
+                        if recv.read_exact(&mut len_bytes).await.is_err() {
+                            break;
+                        }
+                        let len = u32::from_be_bytes(len_bytes) as usize;
+                        let mut msg_bytes = vec![0u8; len];
+                        if recv.read_exact(&mut msg_bytes).await.is_err() {
+                            break;
+                        }
+
+                        let confirm_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                            Ok((m, _)) => m,
+                            Err(e) => {
+                                eprintln!("\r\nFailed to deserialize confirmation: {}\r", e);
+                                continue;
+                            }
+                        };
+
+                        match confirm_msg {
+                            crate::ClientMessage::ConfirmResponse { confirmed } => {
+                                if !confirmed {
+                                    println!("\r\nUpload cancelled by user\r");
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                eprintln!("\r\nExpected ConfirmResponse\r");
+                                continue;
+                            }
+                        }
+                    }
+
+                    let actual_path = if file_path.is_dir() {
+                        let err_msg = crate::ServerMessage::Error {
+                            message: format!("Target path is an existing directory: {}. Please specify a filename or use a path with trailing /", path),
+                        };
+                        eprintln!("\r\nError: Target path is an existing directory: {}\r", path);
+                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            let len = (encoded.len() as u32).to_be_bytes();
+                            let mut full_msg = Vec::new();
+                            full_msg.extend_from_slice(&len);
+                            full_msg.extend_from_slice(&encoded);
+                            let _ = send_tx.send(full_msg);
+                        }
+                        continue;
+                    } else {
+                        path.clone()
+                    };
+
+                    // Create parent directories if needed
+                    if let Some(parent) = file_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            eprintln!("\r\nFailed to create directories: {}\r", e);
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to create directories: {}", e),
+                            };
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Open file for writing
+                    match std::fs::File::create(&actual_path) {
+                        Ok(file) => {
+                            upload_file = Some(file);
+                            upload_path = Some(actual_path.clone());
+
+                            // Send acknowledgment
+                            let ack_msg = crate::ServerMessage::UploadAck;
+                            if let Ok(encoded) = bincode::encode_to_vec(&ack_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("\r\nFailed to create file: {}\r", e);
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to create file: {}", e),
+                            };
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                        }
+                    }
+                }
+                crate::ClientMessage::FileChunk { data } => {
+                    // Write chunk to file
+                    if let Some(ref mut file) = upload_file {
+                        if let Err(e) = file.write_all(&data) {
+                            eprintln!("\r\nFailed to write to file: {}\r", e);
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to write to file: {}", e),
+                            };
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            // Clear upload state
+                            upload_file = None;
+                            upload_path = None;
+                        }
+                    } else {
+                        eprintln!("\r\nReceived file chunk without StartUpload\r");
+                    }
+                }
+                crate::ClientMessage::EndUpload => {
+                    if let Some(path) = &upload_path {
+                        println!("\r\nFile upload completed: {}\r", path);
+                    }
+                    // Close the file and clear state
+                    upload_file = None;
+                    upload_path = None;
+                }
+                crate::ClientMessage::RequestDownload { path } => {
+                    println!("\r\nClient requested download: {}\r", path);
+                    // TODO: Implement file download
+                }
+                crate::ClientMessage::Disconnect => {
+                    println!("\r\nClient requested disconnect\r");
+                    break;
+                }
+                _ => {
+                    eprintln!("\r\nUnexpected message type in file transfer session\r");
+                }
+            }
+        }
+
+        // Clean up
+        send_task.abort();
+        println!("\r\nFile transfer session closed for {node_id}\r");
 
         Ok(())
     }

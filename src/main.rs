@@ -24,6 +24,27 @@ enum Commands {
         /// Connection string from the server
         connection_string: String,
     },
+    /// Send a file or directory to the server
+    Send {
+        /// Connection string from the server
+        connection_string: String,
+        /// Local file or directory path
+        local_path: String,
+        /// Remote destination path
+        remote_path: String,
+        /// Force overwrite without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Pull a file or directory from the server
+    Pull {
+        /// Connection string from the server
+        connection_string: String,
+        /// Remote file or directory path
+        remote_path: String,
+        /// Local destination path
+        local_path: String,
+    },
 }
 
 #[tokio::main]
@@ -36,6 +57,12 @@ async fn main() -> Result<()> {
         }
         Commands::Connect { connection_string } => {
             kerr::client::run_client(connection_string).await?;
+        }
+        Commands::Send { connection_string, local_path, remote_path, force } => {
+            kerr::client::send_file(connection_string, local_path, remote_path, force).await?;
+        }
+        Commands::Pull { connection_string, remote_path, local_path } => {
+            kerr::client::pull_file(connection_string, remote_path, local_path).await?;
         }
     }
 

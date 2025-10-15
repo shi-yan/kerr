@@ -17,3 +17,5 @@ clap = { version = "4.5", features = ["derive"] }
 base64 = "0.22"
 arboard = "3.6"
 futures = "0.3"
+indicatif = "0.18"
+walkdir = "2.5"
