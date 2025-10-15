@@ -4,13 +4,78 @@ use iroh::{Endpoint, NodeAddr};
 use n0_snafu::{Result, ResultExt};
 use std::io::{self, Write};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
     terminal::{self, ClearType},
     ExecutableCommand,
 };
 use crate::{ClientMessage, ServerMessage, ALPN};
 use bincode::config;
 use base64::Engine;
+
+/// Convert a crossterm KeyEvent to raw terminal bytes
+fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut bytes = Vec::new();
+
+    match event.code {
+        KeyCode::Char(c) => {
+            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                // Control characters
+                if c.is_ascii_lowercase() || c.is_ascii_uppercase() {
+                    // Ctrl+A = 1, Ctrl+B = 2, etc.
+                    let ctrl_code = (c.to_ascii_lowercase() as u8) - b'a' + 1;
+                    bytes.push(ctrl_code);
+                } else {
+                    // For other chars with Ctrl, just send the char
+                    bytes.extend_from_slice(c.to_string().as_bytes());
+                }
+            } else if event.modifiers.contains(KeyModifiers::ALT) {
+                // Alt/Meta sends ESC followed by the character
+                bytes.push(27); // ESC
+                bytes.extend_from_slice(c.to_string().as_bytes());
+            } else {
+                // Regular character
+                bytes.extend_from_slice(c.to_string().as_bytes());
+            }
+        }
+        KeyCode::Enter => bytes.push(b'\r'),
+        KeyCode::Backspace => bytes.push(127), // DEL
+        KeyCode::Tab => bytes.push(b'\t'),
+        KeyCode::Esc => bytes.push(27),
+        KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
+        KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
+        KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
+        KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
+        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
+        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
+        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+        KeyCode::Insert => bytes.extend_from_slice(b"\x1b[2~"),
+        KeyCode::F(n) => {
+            match n {
+                1 => bytes.extend_from_slice(b"\x1bOP"),
+                2 => bytes.extend_from_slice(b"\x1bOQ"),
+                3 => bytes.extend_from_slice(b"\x1bOR"),
+                4 => bytes.extend_from_slice(b"\x1bOS"),
+                5 => bytes.extend_from_slice(b"\x1b[15~"),
+                6 => bytes.extend_from_slice(b"\x1b[17~"),
+                7 => bytes.extend_from_slice(b"\x1b[18~"),
+                8 => bytes.extend_from_slice(b"\x1b[19~"),
+                9 => bytes.extend_from_slice(b"\x1b[20~"),
+                10 => bytes.extend_from_slice(b"\x1b[21~"),
+                11 => bytes.extend_from_slice(b"\x1b[23~"),
+                12 => bytes.extend_from_slice(b"\x1b[24~"),
+                _ => {}
+            }
+        }
+        _ => {
+            // Unsupported key, ignore
+        }
+    }
+
+    bytes
+}
 
 pub async fn run_client(connection_string: String) -> Result<()> {
     // Decode the connection string (base64 -> JSON -> NodeAddr)
@@ -81,66 +146,36 @@ pub async fn run_client(connection_string: String) -> Result<()> {
         }
     });
 
-    // Spawn task to handle keyboard input (use spawn_blocking for blocking I/O)
+    // Spawn task to handle stdin input in raw mode using crossterm events
+    // This handles both keyboard input and terminal resize events
     let msg_tx_clone = msg_tx.clone();
-    let input_task = tokio::task::spawn_blocking(move || {
-        loop {
-            // Poll for events with timeout
-            if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Key(key_event)) => {
-                        // Check for Ctrl+D to disconnect
-                        if key_event.code == KeyCode::Char('d')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                            let _ = msg_tx_clone.send(ClientMessage::Disconnect);
-                            break;
-                        }
+    let input_task = tokio::spawn(async move {
+        use futures::StreamExt;
+        use crossterm::event::{EventStream, Event, KeyCode, KeyEvent, KeyModifiers};
 
-                        // Convert key event to bytes
-                        let data = match key_event.code {
-                            KeyCode::Char(c) => {
-                                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                                    // Handle Ctrl+key combinations
-                                    if c.is_ascii_alphabetic() {
-                                        let ctrl_char = (c.to_ascii_lowercase() as u8 - b'a' + 1) as char;
-                                        vec![ctrl_char as u8]
-                                    } else {
-                                        vec![c as u8]
-                                    }
-                                } else {
-                                    c.to_string().into_bytes()
-                                }
-                            }
-                            KeyCode::Enter => vec![b'\r'],
-                            KeyCode::Backspace => vec![0x7f], // DEL character
-                            KeyCode::Tab => vec![b'\t'],
-                            KeyCode::Esc => vec![0x1b],
-                            KeyCode::Up => b"\x1b[A".to_vec(),
-                            KeyCode::Down => b"\x1b[B".to_vec(),
-                            KeyCode::Right => b"\x1b[C".to_vec(),
-                            KeyCode::Left => b"\x1b[D".to_vec(),
-                            KeyCode::Home => b"\x1b[H".to_vec(),
-                            KeyCode::End => b"\x1b[F".to_vec(),
-                            KeyCode::PageUp => b"\x1b[5~".to_vec(),
-                            KeyCode::PageDown => b"\x1b[6~".to_vec(),
-                            KeyCode::Delete => b"\x1b[3~".to_vec(),
-                            KeyCode::Insert => b"\x1b[2~".to_vec(),
-                            _ => continue,
-                        };
-
-                        // Send key event to server
-                        let msg = ClientMessage::KeyEvent { data };
-                        if msg_tx_clone.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Event::Resize(cols, rows)) => {
-                        // Send resize event to server
-                        let msg = ClientMessage::Resize { cols, rows };
-                        let _ = msg_tx_clone.send(msg);
-                    }
-                    _ => {}
+        let mut event_stream = EventStream::new();
+        while let Some(event_result) = event_stream.next().await {
+            match event_result {
+                Ok(Event::Key(KeyEvent { code: KeyCode::Char('d'), modifiers: KeyModifiers::CONTROL, .. })) => {
+                    // Ctrl+D - disconnect
+                    let _ = msg_tx_clone.send(ClientMessage::Disconnect);
+                    break;
                 }
+                Ok(Event::Key(key_event)) => {
+                    // Convert key event to raw bytes
+                    let data = key_event_to_bytes(key_event);
+                    if msg_tx_clone.send(ClientMessage::KeyEvent { data }).is_err() {
+                        break;
+                    }
+                }
+                Ok(Event::Resize(cols, rows)) => {
+                    // Handle terminal resize
+                    let _ = msg_tx_clone.send(ClientMessage::Resize { cols, rows });
+                }
+                Ok(_) => {
+                    // Ignore other events (mouse, focus, etc.)
+                }
+                Err(_) => break,
             }
         }
     });
