@@ -1,0 +1,19 @@
+[package]
+name = "kerr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iroh = "0.93.1"
+n0-snafu = "0.2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "2.0"
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.9"
+crossterm = { version = "0.29", features = ["event-stream"] }
+clap = { version = "4.5", features = ["derive"] }
+base64 = "0.22"
+arboard = "3.6"
+futures = "0.3"
