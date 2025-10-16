@@ -45,6 +45,8 @@ enum Commands {
         /// Local destination path
         local_path: String,
     },
+    /// Browse the local filesystem with an interactive TUI
+    Browse,
 }
 
 #[tokio::main]
@@ -63,6 +65,10 @@ async fn main() -> Result<()> {
         }
         Commands::Pull { connection_string, remote_path, local_path } => {
             kerr::client::pull_file(connection_string, remote_path, local_path).await?;
+        }
+        Commands::Browse => {
+            kerr::browser::run_browser()
+                .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
         }
     }
 

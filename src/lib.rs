@@ -3,6 +3,8 @@ use bincode::{Decode, Encode};
 pub mod server;
 pub mod client;
 pub mod transfer;
+pub mod browser;
+pub mod custom_explorer;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
