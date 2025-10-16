@@ -17,8 +17,9 @@ use tui_textarea::TextArea;
 use ratatui_image::{picker::Picker, StatefulImage};
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
-use crate::custom_explorer::{FileExplorer, Theme};
+use crate::custom_explorer::{FileExplorer, Theme, LocalFilesystem, Filesystem};
 
 /// Preview mode state
 enum PreviewMode {
@@ -27,8 +28,14 @@ enum PreviewMode {
     Image,     // Show image preview
 }
 
-/// Run the interactive file browser
+/// Run the interactive file browser with local filesystem
 pub fn run_browser() -> io::Result<()> {
+    let filesystem = Arc::new(LocalFilesystem::new());
+    run_browser_with_fs(filesystem)
+}
+
+/// Run the interactive file browser with a specific filesystem implementation
+pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,7 +53,7 @@ pub fn run_browser() -> io::Result<()> {
                 .add_modifier(Modifier::BOLD),
         );
 
-    let mut file_explorer = FileExplorer::with_theme(theme)?;
+    let mut file_explorer = FileExplorer::with_theme(theme, filesystem)?;
     let mut preview_mode = PreviewMode::Metadata;
     let mut content_viewer: Option<TextArea> = None;
     let mut image_state: Option<ratatui_image::protocol::StatefulProtocol> = None;

@@ -12,7 +12,6 @@ use std::path::Path;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{ClientMessage, ServerMessage, ALPN};
 use arboard::Clipboard;
-use base64::Engine;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -41,15 +40,14 @@ pub async fn run_server() -> Result<()> {
 
     let addr = router.endpoint().node_addr();
 
-    // Encode the address as a connection string (JSON -> base64)
-    let addr_json = serde_json::to_string(&addr).unwrap();
-    let connection_string = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(addr_json.as_bytes());
+    // Encode the address as a compressed connection string (JSON -> gzip -> base64)
+    let connection_string = crate::encode_connection_string(&addr);
 
     // Build the connection commands
     let connect_command = format!("kerr connect {}", connection_string);
     let send_command = format!("kerr send {}", connection_string);
     let pull_command = format!("kerr pull {}", connection_string);
+    let browse_command = format!("kerr browse {}", connection_string);
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Kerr Server Online                        ║");
@@ -58,8 +56,9 @@ pub async fn run_server() -> Result<()> {
     println!("  Connect: {}", connect_command);
     println!("  Send:    {} <local> <remote>", send_command);
     println!("  Pull:    {} <remote> <local>", pull_command);
+    println!("  Browse:  {}", browse_command);
     println!("\n─────────────────────────────────────────────────────────────────");
-    println!("Keys: [c]onnect | [s]end | [p]ull | Ctrl+C to stop");
+    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | Ctrl+C to stop");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
@@ -207,6 +206,10 @@ impl ProtocolHandler for KerrServer {
             crate::SessionType::FileTransfer => {
                 println!("\r\nStarting file transfer session for {node_id}\r");
                 Self::handle_file_transfer_session(node_id, send, recv).await
+            }
+            crate::SessionType::FileBrowser => {
+                println!("\r\nStarting file browser session for {node_id}\r");
+                Self::handle_file_browser_session(node_id, send, recv).await
             }
         }
     }
@@ -637,6 +640,179 @@ impl KerrServer {
         send_task.abort();
         println!("\r\nFile transfer session closed for {node_id}\r");
 
+        Ok(())
+    }
+
+    async fn handle_file_browser_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        use std::path::Path;
+
+        let config = bincode::config::standard();
+
+        println!("\r\nFile browser session started for {node_id}\r");
+
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+                break;
+            }
+
+            // Deserialize message
+            let (msg, _): (crate::ClientMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            // Handle filesystem requests
+            let response = match msg {
+                crate::ClientMessage::FsReadDir { path } => {
+                    println!("\r\nFsReadDir request: {}\r", path);
+
+                    match std::fs::read_dir(Path::new(&path)) {
+                        Ok(entries) => {
+                            let mut file_entries = Vec::new();
+
+                            for entry in entries {
+                                if let Ok(entry) = entry {
+                                    let path = entry.path();
+                                    let metadata = std::fs::metadata(&path);
+
+                                    if let Ok(metadata) = metadata {
+                                        let file_name = path.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        let is_dir = metadata.is_dir();
+
+                                        #[cfg(unix)]
+                                        let is_hidden = file_name.starts_with('.');
+
+                                        #[cfg(windows)]
+                                        let is_hidden = {
+                                            use std::os::windows::fs::MetadataExt;
+                                            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+                                            (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+                                        };
+
+                                        #[cfg(not(any(unix, windows)))]
+                                        let is_hidden = false;
+
+                                        let name = if is_dir {
+                                            format!("{}/", file_name)
+                                        } else {
+                                            file_name
+                                        };
+
+                                        use crate::custom_explorer::file_explorer::FileMetadata;
+                                        use crate::custom_explorer::filesystem::FileEntry;
+
+                                        file_entries.push(FileEntry {
+                                            name,
+                                            path: path.clone(),
+                                            is_dir,
+                                            is_hidden,
+                                            metadata: Some(FileMetadata {
+                                                size: metadata.len(),
+                                                created: metadata.created().ok(),
+                                                modified: metadata.modified().ok(),
+                                                is_dir,
+                                            }),
+                                        });
+                                    }
+                                }
+                            }
+
+                            let entries_json = serde_json::to_string(&file_entries).unwrap();
+                            crate::ServerMessage::FsDirListing { entries_json }
+                        }
+                        Err(e) => {
+                            crate::ServerMessage::Error {
+                                message: format!("Failed to read directory: {}", e),
+                            }
+                        }
+                    }
+                }
+
+                crate::ClientMessage::FsMetadata { path } => {
+                    println!("\r\nFsMetadata request: {}\r", path);
+
+                    match std::fs::metadata(Path::new(&path)) {
+                        Ok(metadata) => {
+                            use crate::custom_explorer::file_explorer::FileMetadata;
+
+                            let file_metadata = FileMetadata {
+                                size: metadata.len(),
+                                created: metadata.created().ok(),
+                                modified: metadata.modified().ok(),
+                                is_dir: metadata.is_dir(),
+                            };
+
+                            let metadata_json = serde_json::to_string(&file_metadata).unwrap();
+                            crate::ServerMessage::FsMetadataResponse { metadata_json }
+                        }
+                        Err(e) => {
+                            crate::ServerMessage::Error {
+                                message: format!("Failed to get metadata: {}", e),
+                            }
+                        }
+                    }
+                }
+
+                crate::ClientMessage::FsReadFile { path } => {
+                    println!("\r\nFsReadFile request: {}\r", path);
+
+                    match std::fs::read(Path::new(&path)) {
+                        Ok(data) => {
+                            crate::ServerMessage::FsFileContent { data }
+                        }
+                        Err(e) => {
+                            crate::ServerMessage::Error {
+                                message: format!("Failed to read file: {}", e),
+                            }
+                        }
+                    }
+                }
+
+                crate::ClientMessage::Disconnect => {
+                    println!("\r\nClient disconnecting\r");
+                    break;
+                }
+
+                _ => {
+                    crate::ServerMessage::Error {
+                        message: "Unexpected message type".to_string(),
+                    }
+                }
+            };
+
+            // Send response
+            match bincode::encode_to_vec(&response, config) {
+                Ok(encoded) => {
+                    let len = (encoded.len() as u32).to_be_bytes();
+                    if let Err(_) = send.write_all(&len).await {
+                        break;
+                    }
+                    if let Err(_) = send.write_all(&encoded).await {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        println!("\r\nFile browser session closed for {node_id}\r");
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 //! Kerr client - connects to server and provides interactive terminal
 
-use iroh::{Endpoint, NodeAddr};
+use iroh::Endpoint;
 use n0_snafu::{Result, ResultExt};
 use std::io::{self, Write};
 use crossterm::{
@@ -9,7 +9,6 @@ use crossterm::{
 };
 use crate::{ClientMessage, ServerMessage, ALPN};
 use bincode::config;
-use base64::Engine;
 
 /// Convert a crossterm KeyEvent to raw terminal bytes
 fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
@@ -78,16 +77,9 @@ fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
 }
 
 pub async fn run_client(connection_string: String) -> Result<()> {
-    // Decode the connection string (base64 -> JSON -> NodeAddr)
-    let addr_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(connection_string.as_bytes())
+    // Decode the compressed connection string (base64 -> gzip -> JSON -> NodeAddr)
+    let addr = crate::decode_connection_string(&connection_string)
         .expect("Failed to decode connection string");
-
-    let addr_json_str = std::str::from_utf8(&addr_json)
-        .expect("Invalid UTF-8 in connection string");
-
-    let addr: NodeAddr = serde_json::from_str(addr_json_str)
-        .expect("Failed to parse connection string");
 
     println!("Connecting to: {}", addr.node_id);
 
@@ -239,6 +231,15 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::Progress { .. } => {
                     // Progress update - not used in run_client
                 }
+                ServerMessage::FsDirListing { .. } => {
+                    // Directory listing - not used in run_client (only for browse)
+                }
+                ServerMessage::FsMetadataResponse { .. } => {
+                    // Metadata response - not used in run_client (only for browse)
+                }
+                ServerMessage::FsFileContent { .. } => {
+                    // File content - not used in run_client (only for browse)
+                }
             }
         }
     });
@@ -268,14 +269,9 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     use indicatif::{ProgressBar, ProgressStyle};
     use crate::transfer::{calculate_size, get_files_recursive, CHUNK_SIZE};
 
-    // Decode connection string
-    let addr_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(connection_string.as_bytes())
+    // Decode the compressed connection string (base64 -> gzip -> JSON)
+    let addr = crate::decode_connection_string(&connection_string)
         .expect("Failed to decode connection string");
-    let addr_json_str = std::str::from_utf8(&addr_json)
-        .expect("Invalid UTF-8 in connection string");
-    let addr: NodeAddr = serde_json::from_str(addr_json_str)
-        .expect("Failed to parse connection string");
 
     println!("Connecting to server...");
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
@@ -459,5 +455,52 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
 pub async fn pull_file(_connection_string: String, remote_path: String, local_path: String) -> Result<()> {
     println!("Pull functionality not yet implemented");
     println!("Would pull {} to {}", remote_path, local_path);
+    Ok(())
+}
+
+/// Browse remote filesystem
+pub async fn browse_remote(connection_string: String) -> Result<()> {
+    use std::sync::Arc;
+    use std::path::PathBuf;
+
+    // Decode connection string
+    let addr = crate::decode_connection_string(&connection_string)
+        .expect("Failed to decode connection string");
+
+    println!("Connecting to server for file browsing...");
+    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let conn = endpoint.connect(addr, ALPN).await?;
+
+    let (mut send, recv) = conn.open_bi().await.e()?;
+
+    // Send Hello message with FileBrowser session type
+    let hello = ClientMessage::Hello {
+        session_type: crate::SessionType::FileBrowser,
+    };
+
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(&hello, config).unwrap();
+    let len = (encoded.len() as u32).to_be_bytes();
+
+    send.write_all(&len).await.e()?;
+    send.write_all(&encoded).await.e()?;
+
+    println!("Connected! Starting file browser...");
+
+    // Create RemoteFilesystem
+    use crate::custom_explorer::filesystem::RemoteFilesystem;
+    let remote_fs = Arc::new(RemoteFilesystem::new(
+        PathBuf::from("/"),
+        send,
+        recv,
+    ));
+
+    // Run the browser with remote filesystem
+    crate::browser::run_browser_with_fs(remote_fs)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+
     Ok(())
 }

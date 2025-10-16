@@ -1,4 +1,5 @@
 use bincode::{Decode, Encode};
+use base64::Engine;
 
 pub mod server;
 pub mod client;
@@ -13,6 +14,8 @@ pub enum SessionType {
     Shell,
     /// File transfer session
     FileTransfer,
+    /// File browser session
+    FileBrowser,
 }
 
 /// Messages sent from client to server
@@ -36,6 +39,12 @@ pub enum ClientMessage {
     ConfirmResponse { confirmed: bool },
     /// Request file download (pull)
     RequestDownload { path: String },
+    /// Request to list directory contents (for file browser)
+    FsReadDir { path: String },
+    /// Request file metadata (for file browser)
+    FsMetadata { path: String },
+    /// Request to read file content (for file browser)
+    FsReadFile { path: String },
 }
 
 /// Messages sent from server to client
@@ -57,7 +66,49 @@ pub enum ServerMessage {
     EndDownload,
     /// Transfer progress
     Progress { bytes_transferred: u64, total_bytes: u64 },
+    /// Directory listing response (for file browser)
+    FsDirListing { entries_json: String },
+    /// File metadata response (for file browser)
+    FsMetadataResponse { metadata_json: String },
+    /// File content response (for file browser)
+    FsFileContent { data: Vec<u8> },
 }
 
 /// ALPN for the Kerr protocol
 pub const ALPN: &[u8] = b"kerr/0";
+
+/// Encode a NodeAddr as a compressed connection string (JSON -> gzip -> base64)
+pub fn encode_connection_string(addr: &iroh::NodeAddr) -> String {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let addr_json = serde_json::to_string(addr).unwrap();
+
+    // Compress with gzip
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(addr_json.as_bytes()).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    // Base64 encode
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&compressed)
+}
+
+/// Decode a compressed connection string to NodeAddr (base64 -> gzip -> JSON)
+pub fn decode_connection_string(connection_string: &str) -> Result<iroh::NodeAddr, Box<dyn std::error::Error>> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    // Base64 decode
+    let compressed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(connection_string.as_bytes())?;
+
+    // Decompress with gzip
+    let mut decoder = GzDecoder::new(&compressed[..]);
+    let mut addr_json = String::new();
+    decoder.read_to_string(&mut addr_json)?;
+
+    // Parse JSON
+    let addr: iroh::NodeAddr = serde_json::from_str(&addr_json)?;
+    Ok(addr)
+}

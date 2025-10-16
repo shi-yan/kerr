@@ -1,15 +1,17 @@
 use std::{
-    env, fs, io,
+    io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
 use ratatui::crossterm::event::{Event, KeyCode};
 
 use super::widget::{Renderer, Theme};
+use super::filesystem::{Filesystem, FileEntry};
 
 /// Metadata for a file, including size and timestamps
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileMetadata {
     pub size: u64,
     pub created: Option<SystemTime>,
@@ -82,57 +84,10 @@ pub struct File {
     path: PathBuf,
     is_dir: bool,
     is_hidden: bool,
-    file_type: Option<fs::FileType>,
     metadata: Option<FileMetadata>,
 }
 
 impl File {
-    fn new(path: &Path) -> io::Result<Self> {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
-
-        let metadata = fs::metadata(path)?;
-        let file_type = metadata.file_type();
-        let is_dir = file_type.is_dir();
-
-        let file_metadata = FileMetadata {
-            size: metadata.len(),
-            created: metadata.created().ok(),
-            modified: metadata.modified().ok(),
-            is_dir,
-        };
-
-        #[cfg(unix)]
-        let is_hidden = file_name.starts_with('.');
-
-        #[cfg(windows)]
-        let is_hidden = {
-            use std::os::windows::fs::MetadataExt;
-            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-            (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
-        };
-
-        #[cfg(not(any(unix, windows)))]
-        let is_hidden = false;
-
-        let name = if is_dir {
-            format!("{}/", file_name)
-        } else {
-            file_name.to_string()
-        };
-
-        Ok(Self {
-            name,
-            path: path.to_path_buf(),
-            is_dir,
-            is_hidden,
-            file_type: Some(file_type),
-            metadata: Some(file_metadata),
-        })
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -153,12 +108,20 @@ impl File {
         self.is_hidden
     }
 
-    pub fn file_type(&self) -> Option<&fs::FileType> {
-        self.file_type.as_ref()
-    }
-
     pub fn metadata(&self) -> Option<&FileMetadata> {
         self.metadata.as_ref()
+    }
+}
+
+impl From<FileEntry> for File {
+    fn from(entry: FileEntry) -> Self {
+        Self {
+            name: entry.name,
+            path: entry.path,
+            is_dir: entry.is_dir,
+            is_hidden: entry.is_hidden,
+            metadata: entry.metadata,
+        }
     }
 }
 
@@ -169,23 +132,28 @@ pub struct FileExplorer {
     show_hidden: bool,
     selected: usize,
     theme: Theme,
+    filesystem: Arc<dyn Filesystem>,
 }
 
 impl FileExplorer {
-    pub fn new() -> io::Result<Self> {
-        Self::with_theme(Theme::default())
+    pub fn new(filesystem: Arc<dyn Filesystem>) -> io::Result<Self> {
+        Self::with_theme(Theme::default(), filesystem)
     }
 
-    pub fn with_theme(theme: Theme) -> io::Result<Self> {
-        let cwd = env::current_dir()?;
+    pub fn with_theme(theme: Theme, filesystem: Arc<dyn Filesystem>) -> io::Result<Self> {
+        let cwd = filesystem.current_dir()?;
+
         let mut explorer = Self {
             cwd: cwd.clone(),
             files: Vec::new(),
             show_hidden: false,
             selected: 0,
             theme,
+            filesystem,
         };
-        explorer.set_cwd(&cwd)?;
+
+        // Initial directory load
+        explorer.refresh_sync()?;
         Ok(explorer)
     }
 
@@ -208,7 +176,7 @@ impl FileExplorer {
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
                     // Go to parent directory
-                    if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) {
+                    if let Some(parent) = self.filesystem.parent(&self.cwd) {
                         self.set_cwd(&parent)?;
                     }
                 }
@@ -237,7 +205,7 @@ impl FileExplorer {
                 }
                 KeyCode::Char('.') if key.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL) => {
                     self.set_show_hidden(!self.show_hidden);
-                    self.refresh()?;
+                    self.refresh_sync()?;
                 }
                 _ => {}
             }
@@ -247,7 +215,7 @@ impl FileExplorer {
 
     pub fn set_cwd(&mut self, path: &Path) -> io::Result<()> {
         self.cwd = path.to_path_buf();
-        self.refresh()?;
+        self.refresh_sync()?;
         Ok(())
     }
 
@@ -255,31 +223,38 @@ impl FileExplorer {
         self.show_hidden = show;
     }
 
-    fn refresh(&mut self) -> io::Result<()> {
-        let mut files = Vec::new();
+    /// Synchronous refresh using blocking on async operations
+    fn refresh_sync(&mut self) -> io::Result<()> {
+        let cwd = self.cwd.clone();
+        let filesystem = Arc::clone(&self.filesystem);
+
+        // Use spawn_blocking to run async code without blocking the runtime
+        let entries = std::thread::spawn(move || {
+            // Create a new runtime in this thread
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            rt.block_on(filesystem.read_dir(&cwd))
+        })
+        .join()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thread panicked: {:?}", e)))??;
+
+        let mut files: Vec<File> = Vec::new();
 
         // Add parent directory entry if not at root
-        if self.cwd.parent().is_some() {
+        if let Some(parent) = self.filesystem.parent(&self.cwd) {
             files.push(File {
                 name: String::from("../"),
-                path: self.cwd.parent().unwrap().to_path_buf(),
+                path: parent,
                 is_dir: true,
                 is_hidden: false,
-                file_type: None,
                 metadata: None,
             });
         }
 
-        // Read directory entries
-        for entry in fs::read_dir(&self.cwd)? {
-            let entry = entry?;
-            match File::new(&entry.path()) {
-                Ok(file) => {
-                    if !file.is_hidden() || self.show_hidden {
-                        files.push(file);
-                    }
-                }
-                Err(_) => continue,
+        // Convert FileEntry to File and filter hidden files
+        for entry in entries {
+            if !entry.is_hidden || self.show_hidden {
+                files.push(entry.into());
             }
         }
 
@@ -321,5 +296,37 @@ impl FileExplorer {
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    pub fn filesystem(&self) -> &Arc<dyn Filesystem> {
+        &self.filesystem
+    }
+
+    /// Read file content (async operation, blocking wrapper)
+    pub fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let path = path.to_path_buf();
+        let filesystem = Arc::clone(&self.filesystem);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            rt.block_on(filesystem.read_file(&path))
+        })
+        .join()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thread panicked: {:?}", e)))?
+    }
+
+    /// Read file content as string (async operation, blocking wrapper)
+    pub fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        let path = path.to_path_buf();
+        let filesystem = Arc::clone(&self.filesystem);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            rt.block_on(filesystem.read_to_string(&path))
+        })
+        .join()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thread panicked: {:?}", e)))?
     }
 }
