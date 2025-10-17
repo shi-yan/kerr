@@ -657,21 +657,26 @@ impl KerrServer {
         loop {
             // Read message length
             let mut len_bytes = [0u8; 4];
-            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+            if let Err(e) = recv.read_exact(&mut len_bytes).await {
+                eprintln!("\r\nFailed to read message length: {}\r", e);
                 break;
             }
             let msg_len = u32::from_be_bytes(len_bytes) as usize;
 
             // Read message
             let mut msg_bytes = vec![0u8; msg_len];
-            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+            if let Err(e) = recv.read_exact(&mut msg_bytes).await {
+                eprintln!("\r\nFailed to read message data: {}\r", e);
                 break;
             }
 
             // Deserialize message
             let (msg, _): (crate::ClientMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("\r\nFailed to deserialize message: {}\r", e);
+                    continue;
+                }
             };
 
             // Handle filesystem requests
@@ -686,15 +691,25 @@ impl KerrServer {
                             for entry in entries {
                                 if let Ok(entry) = entry {
                                     let path = entry.path();
-                                    let metadata = std::fs::metadata(&path);
+                                    // Use symlink_metadata to NOT follow symlinks
+                                    // This prevents issues when symlinks point to inaccessible locations
+                                    let metadata_result = std::fs::symlink_metadata(&path);
 
-                                    if let Ok(metadata) = metadata {
+                                    if let Ok(metadata) = metadata_result {
                                         let file_name = path.file_name()
                                             .and_then(|n| n.to_str())
                                             .unwrap_or("")
                                             .to_string();
 
-                                        let is_dir = metadata.is_dir();
+                                        // For symlinks, try to determine if they point to a directory
+                                        let is_dir = if metadata.is_symlink() {
+                                            // Try to follow the symlink to see if it points to a directory
+                                            std::fs::metadata(&path)
+                                                .map(|m| m.is_dir())
+                                                .unwrap_or(false)
+                                        } else {
+                                            metadata.is_dir()
+                                        };
 
                                         #[cfg(unix)]
                                         let is_hidden = file_name.starts_with('.');
@@ -730,6 +745,9 @@ impl KerrServer {
                                                 is_dir,
                                             }),
                                         });
+                                    } else {
+                                        // Log but don't fail - skip entries we can't read metadata for
+                                        eprintln!("\r\nWarning: Could not read metadata for {:?}: {}\r", path, metadata_result.unwrap_err());
                                     }
                                 }
                             }
@@ -738,7 +756,8 @@ impl KerrServer {
                             crate::ServerMessage::FsDirListing { entries_json }
                         }
                         Err(e) => {
-                            crate::ServerMessage::Error {
+                            eprintln!("\r\nError reading directory {}: {}\r", path, e);
+                            crate::ServerMessage::FsError {
                                 message: format!("Failed to read directory: {}", e),
                             }
                         }
@@ -763,7 +782,7 @@ impl KerrServer {
                             crate::ServerMessage::FsMetadataResponse { metadata_json }
                         }
                         Err(e) => {
-                            crate::ServerMessage::Error {
+                            crate::ServerMessage::FsError {
                                 message: format!("Failed to get metadata: {}", e),
                             }
                         }
@@ -778,7 +797,7 @@ impl KerrServer {
                             crate::ServerMessage::FsFileContent { data }
                         }
                         Err(e) => {
-                            crate::ServerMessage::Error {
+                            crate::ServerMessage::FsError {
                                 message: format!("Failed to read file: {}", e),
                             }
                         }
@@ -796,7 +815,7 @@ impl KerrServer {
                             crate::ServerMessage::FsHashResponse { hash: hash_hex }
                         }
                         Err(e) => {
-                            crate::ServerMessage::Error {
+                            crate::ServerMessage::FsError {
                                 message: format!("Failed to hash file: {}", e),
                             }
                         }
@@ -819,14 +838,19 @@ impl KerrServer {
             match bincode::encode_to_vec(&response, config) {
                 Ok(encoded) => {
                     let len = (encoded.len() as u32).to_be_bytes();
-                    if let Err(_) = send.write_all(&len).await {
+                    if let Err(e) = send.write_all(&len).await {
+                        eprintln!("\r\nFailed to write response length: {}\r", e);
                         break;
                     }
-                    if let Err(_) = send.write_all(&encoded).await {
+                    if let Err(e) = send.write_all(&encoded).await {
+                        eprintln!("\r\nFailed to write response data: {}\r", e);
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("\r\nFailed to encode response: {}\r", e);
+                    break;
+                }
             }
         }
 

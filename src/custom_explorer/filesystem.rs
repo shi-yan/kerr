@@ -152,6 +152,7 @@ pub struct RemoteFilesystem {
     root_path: PathBuf,
     send: Arc<tokio::sync::Mutex<iroh::endpoint::SendStream>>,
     recv: Arc<tokio::sync::Mutex<iroh::endpoint::RecvStream>>,
+    error_callback: Arc<std::sync::Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>,
 }
 
 impl RemoteFilesystem {
@@ -164,6 +165,16 @@ impl RemoteFilesystem {
             root_path,
             send: Arc::new(tokio::sync::Mutex::new(send)),
             recv: Arc::new(tokio::sync::Mutex::new(recv)),
+            error_callback: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    pub fn set_error_callback<F>(&self, callback: F)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        if let Ok(mut cb) = self.error_callback.lock() {
+            *cb = Some(Box::new(callback));
         }
     }
 
@@ -216,6 +227,15 @@ impl Filesystem for RemoteFilesystem {
                 serde_json::from_str(&entries_json)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
             }
+            crate::ServerMessage::FsError { message } => {
+                // Call error callback if set
+                if let Ok(cb_guard) = self.error_callback.lock() {
+                    if let Some(cb) = cb_guard.as_ref() {
+                        cb(message.clone());
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
             crate::ServerMessage::Error { message } => {
                 Err(io::Error::new(io::ErrorKind::Other, message))
             }
@@ -235,6 +255,15 @@ impl Filesystem for RemoteFilesystem {
             crate::ServerMessage::FsMetadataResponse { metadata_json } => {
                 serde_json::from_str(&metadata_json)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            }
+            crate::ServerMessage::FsError { message } => {
+                // Call error callback if set
+                if let Ok(cb_guard) = self.error_callback.lock() {
+                    if let Some(cb) = cb_guard.as_ref() {
+                        cb(message.clone());
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::Other, message))
             }
             crate::ServerMessage::Error { message } => {
                 Err(io::Error::new(io::ErrorKind::Other, message))
@@ -265,6 +294,15 @@ impl Filesystem for RemoteFilesystem {
 
         match self.send_request(msg).await? {
             crate::ServerMessage::FsFileContent { data } => Ok(data),
+            crate::ServerMessage::FsError { message } => {
+                // Call error callback if set
+                if let Ok(cb_guard) = self.error_callback.lock() {
+                    if let Some(cb) = cb_guard.as_ref() {
+                        cb(message.clone());
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
             crate::ServerMessage::Error { message } => {
                 Err(io::Error::new(io::ErrorKind::Other, message))
             }
@@ -289,6 +327,15 @@ impl RemoteFilesystem {
 
         match self.send_request(msg).await? {
             crate::ServerMessage::FsHashResponse { hash } => Ok(hash),
+            crate::ServerMessage::FsError { message } => {
+                // Call error callback if set
+                if let Ok(cb_guard) = self.error_callback.lock() {
+                    if let Some(cb) = cb_guard.as_ref() {
+                        cb(message.clone());
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
             crate::ServerMessage::Error { message } => {
                 Err(io::Error::new(io::ErrorKind::Other, message))
             }

@@ -76,6 +76,8 @@ pub enum ServerMessage {
     FsFileContent { data: Vec<u8> },
     /// File hash response (for file browser caching) - 32 bytes blake3 hash as hex string
     FsHashResponse { hash: String },
+    /// Filesystem error notification (for file browser UI feedback)
+    FsError { message: String },
 }
 
 /// ALPN for the Kerr protocol
