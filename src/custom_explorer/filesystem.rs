@@ -360,19 +360,29 @@ impl FileCache {
         Ok(Self { cache_dir })
     }
 
-    /// Get the path to a cached file by its hash
+    /// Get the path to a cached file by its hash (no extension)
     pub fn get_cached_path(&self, hash: &str) -> PathBuf {
         self.cache_dir.join(hash)
     }
 
-    /// Check if a file with the given hash exists in the cache
-    pub fn has_cached(&self, hash: &str) -> bool {
-        self.get_cached_path(hash).exists()
+    /// Get cached path with original file extension preserved
+    pub fn get_cached_path_with_ext(&self, hash: &str, original_path: &Path) -> PathBuf {
+        if let Some(ext) = original_path.extension() {
+            let filename = format!("{}.{}", hash, ext.to_string_lossy());
+            self.cache_dir.join(filename)
+        } else {
+            self.cache_dir.join(hash)
+        }
     }
 
-    /// Store data in the cache with the given hash
-    pub fn store(&self, hash: &str, data: &[u8]) -> io::Result<PathBuf> {
-        let path = self.get_cached_path(hash);
+    /// Check if a file with the given hash exists in the cache (with or without extension)
+    pub fn has_cached(&self, hash: &str, original_path: &Path) -> bool {
+        self.get_cached_path_with_ext(hash, original_path).exists()
+    }
+
+    /// Store data in the cache with the given hash, preserving file extension
+    pub fn store(&self, hash: &str, data: &[u8], original_path: &Path) -> io::Result<PathBuf> {
+        let path = self.get_cached_path_with_ext(hash, original_path);
         std::fs::write(&path, data)?;
         Ok(path)
     }
@@ -386,8 +396,8 @@ impl FileCache {
         // First, get the hash from remote
         let hash = remote_fs.hash_file(remote_path).await?;
 
-        // Check if we have it cached
-        let cached_path = self.get_cached_path(&hash);
+        // Check if we have it cached (with extension)
+        let cached_path = self.get_cached_path_with_ext(&hash, remote_path);
         if cached_path.exists() {
             return Ok(cached_path);
         }
@@ -404,7 +414,7 @@ impl FileCache {
             ));
         }
 
-        // Store in cache
-        self.store(&hash, &data)
+        // Store in cache with original extension
+        self.store(&hash, &data, remote_path)
     }
 }
