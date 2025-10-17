@@ -68,6 +68,7 @@ pub async fn run_server() -> Result<()> {
     let connect_clone = connect_command.clone();
     let send_clone = send_command.clone();
     let pull_clone = pull_command.clone();
+    let browse_clone = browse_command.clone();
 
     let keyboard_task = tokio::task::spawn(async move {
         let mut event_stream = EventStream::new();
@@ -113,6 +114,21 @@ pub async fn run_server() -> Result<()> {
                                     Ok(mut clipboard) => {
                                         if clipboard.set_text(&pull_clone).is_ok() {
                                             println!("\r\n✓ Pull command copied to clipboard!\r\n");
+                                        } else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 'b' key press to copy browse command
+                            (KeyCode::Char('b'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&browse_clone).is_ok() {
+                                            println!("\r\n✓ Browse command copied to clipboard!\r\n");
                                         } else {
                                             eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
                                         }

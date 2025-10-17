@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tui_textarea::TextArea;
 use ratatui_image::{picker::Picker, StatefulImage};
+use tui_menu::{Menu, MenuItem, MenuState};
 
 use crate::custom_explorer::{FileExplorer, Theme, LocalFilesystem, RemoteFilesystem, Filesystem, FileCache};
 
@@ -43,6 +44,14 @@ enum PreviewMode {
     Image,          // Image preview
 }
 
+/// Menu action for text preview
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MenuAction {
+    Save,
+    SaveAs,
+    Back,
+}
+
 /// Copy operation state
 #[derive(Clone)]
 enum CopyMode {
@@ -52,6 +61,9 @@ enum CopyMode {
         dest_dir: std::path::PathBuf,
         direction: CopyDirection,
         overwrite: bool,                            // Whether destination exists
+    },
+    Error {                                         // Show error message
+        message: String,
     },
     InProgress {                                    // Copy in progress
         source: std::path::PathBuf,
@@ -144,6 +156,22 @@ pub fn run_browser_with_fs(
     let mut text_viewer: Option<TextArea> = None;
     let mut image_state: Option<ratatui_image::protocol::StatefulProtocol> = None;
 
+    // Menu state for text preview
+    let mut menu_visible = false;
+    // Create menu items
+    let menu_items = vec![
+        MenuItem::group(
+            "File",
+            vec![
+                MenuItem::item("Save", MenuAction::Save),
+                MenuItem::item("Save As", MenuAction::SaveAs),
+            ],
+        ),
+        MenuItem::item("Back", MenuAction::Back),
+    ];
+    let mut menu_state = MenuState::new(menu_items);
+    let mut current_file_path: Option<std::path::PathBuf> = None;
+
     // Copy mode state
     let mut copy_mode = CopyMode::None;
 
@@ -215,7 +243,7 @@ pub fn run_browser_with_fs(
                             FocusedPane::Local => &local_explorer,
                             FocusedPane::Remote => remote_explorer.as_ref().unwrap_or(&local_explorer),
                         };
-                        render_text_preview(f, f.area(), focused_explorer, viewer);
+                        render_text_preview(f, f.area(), focused_explorer, viewer, menu_visible, &mut menu_state);
                     }
                 }
                 PreviewMode::Image => {
@@ -230,6 +258,9 @@ pub fn run_browser_with_fs(
 
             // Render copy popup overlay if in copy mode
             match &copy_mode {
+                CopyMode::Error { message } => {
+                    render_copy_error(f, f.area(), message);
+                }
                 CopyMode::Confirming { source, dest_dir, direction, overwrite } => {
                     render_copy_confirmation(f, f.area(), source, dest_dir, direction, *overwrite);
                 }
@@ -254,6 +285,10 @@ pub fn run_browser_with_fs(
             if let Event::Key(key) = event::read()? {
                 // Handle copy mode first (highest priority)
                 match &copy_mode {
+                    CopyMode::Error { .. } => {
+                        // Error popup - any key dismisses it
+                        copy_mode = CopyMode::None;
+                    }
                     CopyMode::Confirming { source, dest_dir, direction, overwrite: _ } => {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -397,25 +432,33 @@ pub fn run_browser_with_fs(
 
                                         // Check if destination already exists
                                         let dest_path = dest_dir.join(source.file_name().unwrap_or_default());
-                                        let dest_exists = dest_path.exists();
 
-                                        // Show warning if file already exists
-                                        if dest_exists {
-                                            // Update error message to warn user
-                                            if let Ok(mut error) = error_message.lock() {
-                                                *error = Some(ErrorMessage {
-                                                    message: format!("⚠ Destination already exists! Press 'c' again to confirm overwrite."),
-                                                    timestamp: Instant::now(),
-                                                });
+                                        // Check if destination is a directory - we can't overwrite directories
+                                        if dest_path.exists() && dest_path.is_dir() {
+                                            copy_mode = CopyMode::Error {
+                                                message: format!("Cannot overwrite directory: {}", dest_path.display()),
+                                            };
+                                        } else {
+                                            let dest_exists = dest_path.exists();
+
+                                            // Show warning if file already exists
+                                            if dest_exists {
+                                                // Update error message to warn user
+                                                if let Ok(mut error) = error_message.lock() {
+                                                    *error = Some(ErrorMessage {
+                                                        message: format!("⚠ Destination file already exists!"),
+                                                        timestamp: Instant::now(),
+                                                    });
+                                                }
                                             }
-                                        }
 
-                                        copy_mode = CopyMode::Confirming {
-                                            source,
-                                            dest_dir,
-                                            direction,
-                                            overwrite: dest_exists,
-                                        };
+                                            copy_mode = CopyMode::Confirming {
+                                                source,
+                                                dest_dir,
+                                                direction,
+                                                overwrite: dest_exists,
+                                            };
+                                        }
                                     }
                                 }
                             }
@@ -475,7 +518,9 @@ pub fn run_browser_with_fs(
                                         }
                                     } else {
                                         preview_mode = PreviewMode::Text;
+                                        current_file_path = Some(current.path().to_path_buf());
                                         text_viewer = Some(load_file_into_textarea(current.path(), &cache, &remote_fs));
+                                        menu_visible = false; // Reset menu state when entering preview
                                     }
                                 }
                             }
@@ -523,16 +568,92 @@ pub fn run_browser_with_fs(
                     }
                     PreviewMode::Text => {
                         // Text preview mode
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') => {
-                                // Exit preview mode
-                                preview_mode = PreviewMode::None;
-                                text_viewer = None;
+                        if menu_visible {
+                            // Menu is visible - handle menu navigation
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Close menu
+                                    menu_visible = false;
+                                    menu_state.reset();
+                                }
+                                KeyCode::Left | KeyCode::Char('h') => {
+                                    menu_state.left();
+                                }
+                                KeyCode::Right | KeyCode::Char('l') => {
+                                    menu_state.right();
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    menu_state.down();
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    menu_state.up();
+                                }
+                                KeyCode::Enter | KeyCode::Char(' ') => {
+                                    menu_state.select();
+                                }
+                                _ => {}
                             }
-                            _ => {
-                                // Let textarea handle scrolling
-                                if let Some(ref mut viewer) = text_viewer {
-                                    viewer.input(ratatui::crossterm::event::KeyEvent::from(key));
+
+                            // Check for menu events
+                            for event in menu_state.drain_events() {
+                                let tui_menu::MenuEvent::Selected(action) = event;
+                                match action {
+                                    MenuAction::Save => {
+                                        // Save file
+                                        if let (Some(viewer), Some(path)) = (&text_viewer, &current_file_path) {
+                                            let content = viewer.lines().join("\n");
+                                            match std::fs::write(path, content) {
+                                                Ok(_) => {
+                                                    if let Ok(mut error) = error_message.lock() {
+                                                        *error = Some(ErrorMessage {
+                                                            message: format!("✓ File saved: {}", path.display()),
+                                                            timestamp: Instant::now(),
+                                                        });
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut error) = error_message.lock() {
+                                                        *error = Some(ErrorMessage {
+                                                            message: format!("Failed to save file: {}", e),
+                                                            timestamp: Instant::now(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        menu_visible = false;
+                                    }
+                                    MenuAction::SaveAs => {
+                                        // TODO: Implement save as functionality
+                                        if let Ok(mut error) = error_message.lock() {
+                                            *error = Some(ErrorMessage {
+                                                message: String::from("Save As not yet implemented"),
+                                                timestamp: Instant::now(),
+                                            });
+                                        }
+                                        menu_visible = false;
+                                    }
+                                    MenuAction::Back => {
+                                        // Exit preview mode
+                                        preview_mode = PreviewMode::None;
+                                        text_viewer = None;
+                                        current_file_path = None;
+                                        menu_visible = false;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Menu is hidden - handle text area navigation
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Toggle menu
+                                    menu_visible = true;
+                                }
+                                _ => {
+                                    // Let textarea handle scrolling
+                                    if let Some(ref mut viewer) = text_viewer {
+                                        viewer.input(ratatui::crossterm::event::KeyEvent::from(key));
+                                    }
                                 }
                             }
                         }
@@ -724,17 +845,34 @@ fn render_text_preview(
     area: Rect,
     file_explorer: &FileExplorer,
     viewer: &TextArea,
+    menu_visible: bool,
+    menu_state: &mut MenuState<MenuAction>,
 ) {
     let current = file_explorer.current();
     let title = format!(" Preview: {} ", current.name());
+
+    // Split area to make room for menu if visible
+    let chunks = if menu_visible {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0)].as_ref())
+            .split(area)
+    };
+
+    let text_area = if menu_visible { chunks[1] } else { chunks[0] };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .title_bottom(Line::from(vec![
             Span::raw(" "),
-            Span::styled("Esc/q", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(": back | "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(": menu | "),
             Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(": scroll | "),
             Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -744,7 +882,37 @@ fn render_text_preview(
 
     let mut viewer_clone = viewer.clone();
     viewer_clone.set_block(block);
-    frame.render_widget(&viewer_clone, area);
+    frame.render_widget(&viewer_clone, text_area);
+
+    // Render menu if visible
+    if menu_visible {
+        render_menu(frame, chunks[0], menu_state);
+    }
+}
+
+/// Render the menu bar for text preview
+fn render_menu(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    menu_state: &mut MenuState<MenuAction>,
+) {
+    let menu = Menu::new()
+        .highlight(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        );
+
+    // Draw a border around the menu area
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title(" Menu ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_stateful_widget(menu, inner, menu_state);
 }
 
 /// Render the image preview in fullscreen
@@ -788,6 +956,53 @@ fn render_image_preview(
 
         frame.render_widget(paragraph, inner);
     }
+}
+
+/// Render the copy error popup
+fn render_copy_error(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    message: &str,
+) {
+    // Create centered popup
+    let popup_width = 70.min(area.width.saturating_sub(4));
+    let popup_height = 10;
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background of the popup area
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Copy Error ")
+        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+
+    let text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("✗ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(message, Style::default().fg(Color::Red)),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press any key to dismiss", Style::default().fg(Color::Gray)),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(paragraph, popup_area);
 }
 
 /// Render the copy confirmation popup
