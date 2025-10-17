@@ -45,6 +45,8 @@ pub enum ClientMessage {
     FsMetadata { path: String },
     /// Request to read file content (for file browser)
     FsReadFile { path: String },
+    /// Request file hash (for file browser caching)
+    FsHashFile { path: String },
 }
 
 /// Messages sent from server to client
@@ -72,6 +74,8 @@ pub enum ServerMessage {
     FsMetadataResponse { metadata_json: String },
     /// File content response (for file browser)
     FsFileContent { data: Vec<u8> },
+    /// File hash response (for file browser caching) - 32 bytes blake3 hash as hex string
+    FsHashResponse { hash: String },
 }
 
 /// ALPN for the Kerr protocol

@@ -19,7 +19,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::custom_explorer::{FileExplorer, Theme, LocalFilesystem, Filesystem};
+use crate::custom_explorer::{FileExplorer, Theme, LocalFilesystem, RemoteFilesystem, Filesystem, FileCache};
 
 /// Preview mode state
 enum PreviewMode {
@@ -31,11 +31,15 @@ enum PreviewMode {
 /// Run the interactive file browser with local filesystem
 pub fn run_browser() -> io::Result<()> {
     let filesystem = Arc::new(LocalFilesystem::new());
-    run_browser_with_fs(filesystem)
+    run_browser_with_fs(filesystem, None)
 }
 
 /// Run the interactive file browser with a specific filesystem implementation
-pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
+/// If remote_fs is provided, it will be used for caching remote file access
+pub fn run_browser_with_fs(
+    filesystem: Arc<dyn Filesystem>,
+    remote_fs: Option<Arc<RemoteFilesystem>>,
+) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -57,6 +61,13 @@ pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
     let mut preview_mode = PreviewMode::Metadata;
     let mut content_viewer: Option<TextArea> = None;
     let mut image_state: Option<ratatui_image::protocol::StatefulProtocol> = None;
+
+    // Initialize cache for remote files if remote_fs is provided
+    let cache = if remote_fs.is_some() {
+        Some(FileCache::new()?)
+    } else {
+        None
+    };
 
     // Initialize image picker for terminal
     let mut picker = Picker::from_query_stdio()
@@ -136,7 +147,7 @@ pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
                                 if current.is_file() {
                                     if is_image_file(current.path()) {
                                         // Load image
-                                        match load_image(&mut picker, current.path()) {
+                                        match load_image(&mut picker, current.path(), &cache, &remote_fs) {
                                             Ok(protocol) => {
                                                 preview_mode = PreviewMode::Image;
                                                 image_state = Some(protocol);
@@ -144,12 +155,12 @@ pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
                                             Err(_) => {
                                                 // Fall back to text preview if image loading fails
                                                 preview_mode = PreviewMode::Content;
-                                                content_viewer = Some(load_file_into_textarea(current.path()));
+                                                content_viewer = Some(load_file_into_textarea(current.path(), &cache, &remote_fs));
                                             }
                                         }
                                     } else {
                                         preview_mode = PreviewMode::Content;
-                                        content_viewer = Some(load_file_into_textarea(current.path()));
+                                        content_viewer = Some(load_file_into_textarea(current.path(), &cache, &remote_fs));
                                     }
                                 }
                             }
@@ -185,8 +196,52 @@ pub fn run_browser_with_fs(filesystem: Arc<dyn Filesystem>) -> io::Result<()> {
     result
 }
 
+/// Get local path for a file (either directly or via cache for remote files)
+fn get_local_path(
+    path: &std::path::Path,
+    cache: &Option<FileCache>,
+    remote_fs: &Option<Arc<RemoteFilesystem>>,
+) -> io::Result<std::path::PathBuf> {
+    if let (Some(_cache), Some(remote_fs)) = (cache, remote_fs) {
+        // Remote file - fetch via cache using a new runtime
+        let path = path.to_path_buf();
+        let remote_fs = Arc::clone(remote_fs);
+        let cache_clone = FileCache::new()?; // Create a new cache instance for the thread
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            rt.block_on(cache_clone.get_or_fetch(&path, &remote_fs))
+        })
+        .join()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thread panicked: {:?}", e)))?
+    } else {
+        // Local file - return as is
+        Ok(path.to_path_buf())
+    }
+}
+
 /// Load file content into a TextArea widget
-fn load_file_into_textarea(path: &std::path::Path) -> TextArea<'static> {
+fn load_file_into_textarea(
+    path: &std::path::Path,
+    cache: &Option<FileCache>,
+    remote_fs: &Option<Arc<RemoteFilesystem>>,
+) -> TextArea<'static> {
+    // Get the local path (either original or cached)
+    let local_path = match get_local_path(path, cache, remote_fs) {
+        Ok(p) => p,
+        Err(e) => {
+            return TextArea::new(vec![
+                format!("[Error accessing file: {}]", e),
+            ]);
+        }
+    };
+
+    load_file_into_textarea_from_local(&local_path)
+}
+
+/// Load file content from a local path into a TextArea widget
+fn load_file_into_textarea_from_local(path: &std::path::Path) -> TextArea<'static> {
     let mut textarea = match std::fs::read_to_string(path) {
         Ok(content) => {
             if content.len() > 1_000_000 {
@@ -322,8 +377,15 @@ fn is_image_file(path: &Path) -> bool {
 }
 
 /// Load an image file and create a protocol for rendering
-fn load_image(picker: &mut Picker, path: &Path) -> Result<ratatui_image::protocol::StatefulProtocol, Box<dyn std::error::Error>> {
-    let dyn_img = image::ImageReader::open(path)?.decode()?;
+fn load_image(
+    picker: &mut Picker,
+    path: &Path,
+    cache: &Option<FileCache>,
+    remote_fs: &Option<Arc<RemoteFilesystem>>,
+) -> Result<ratatui_image::protocol::StatefulProtocol, Box<dyn std::error::Error>> {
+    // Get the local path (either original or cached)
+    let local_path = get_local_path(path, cache, remote_fs)?;
+    let dyn_img = image::ImageReader::open(&local_path)?.decode()?;
     let protocol = picker.new_resize_protocol(dyn_img);
     Ok(protocol)
 }

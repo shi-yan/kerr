@@ -279,3 +279,85 @@ impl Filesystem for RemoteFilesystem {
         Ok(self.root_path.clone())
     }
 }
+
+impl RemoteFilesystem {
+    /// Get the blake3 hash of a remote file (for caching)
+    pub async fn hash_file(&self, path: &Path) -> io::Result<String> {
+        let msg = crate::ClientMessage::FsHashFile {
+            path: path.display().to_string(),
+        };
+
+        match self.send_request(msg).await? {
+            crate::ServerMessage::FsHashResponse { hash } => Ok(hash),
+            crate::ServerMessage::Error { message } => {
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Unexpected response type",
+            )),
+        }
+    }
+}
+
+/// Cache manager for remote files using content-addressed storage
+pub struct FileCache {
+    cache_dir: PathBuf,
+}
+
+impl FileCache {
+    /// Create a new cache manager
+    pub fn new() -> io::Result<Self> {
+        let cache_dir = std::env::temp_dir().join("kerr_cache");
+        std::fs::create_dir_all(&cache_dir)?;
+        Ok(Self { cache_dir })
+    }
+
+    /// Get the path to a cached file by its hash
+    pub fn get_cached_path(&self, hash: &str) -> PathBuf {
+        self.cache_dir.join(hash)
+    }
+
+    /// Check if a file with the given hash exists in the cache
+    pub fn has_cached(&self, hash: &str) -> bool {
+        self.get_cached_path(hash).exists()
+    }
+
+    /// Store data in the cache with the given hash
+    pub fn store(&self, hash: &str, data: &[u8]) -> io::Result<PathBuf> {
+        let path = self.get_cached_path(hash);
+        std::fs::write(&path, data)?;
+        Ok(path)
+    }
+
+    /// Get a file from cache or fetch it from the remote filesystem
+    pub async fn get_or_fetch(
+        &self,
+        remote_path: &Path,
+        remote_fs: &RemoteFilesystem,
+    ) -> io::Result<PathBuf> {
+        // First, get the hash from remote
+        let hash = remote_fs.hash_file(remote_path).await?;
+
+        // Check if we have it cached
+        let cached_path = self.get_cached_path(&hash);
+        if cached_path.exists() {
+            return Ok(cached_path);
+        }
+
+        // Not cached, fetch the file
+        let data = remote_fs.read_file(remote_path).await?;
+
+        // Verify the hash matches
+        let computed_hash = blake3::hash(&data).to_hex().to_string();
+        if computed_hash != hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Hash mismatch: file may have been modified during transfer",
+            ));
+        }
+
+        // Store in cache
+        self.store(&hash, &data)
+    }
+}

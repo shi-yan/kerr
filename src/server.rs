@@ -785,6 +785,24 @@ impl KerrServer {
                     }
                 }
 
+                crate::ClientMessage::FsHashFile { path } => {
+                    println!("\r\nFsHashFile request: {}\r", path);
+
+                    match std::fs::read(Path::new(&path)) {
+                        Ok(data) => {
+                            // Calculate blake3 hash
+                            let hash = blake3::hash(&data);
+                            let hash_hex = hash.to_hex().to_string();
+                            crate::ServerMessage::FsHashResponse { hash: hash_hex }
+                        }
+                        Err(e) => {
+                            crate::ServerMessage::Error {
+                                message: format!("Failed to hash file: {}", e),
+                            }
+                        }
+                    }
+                }
+
                 crate::ClientMessage::Disconnect => {
                     println!("\r\nClient disconnecting\r");
                     break;

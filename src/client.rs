@@ -240,6 +240,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::FsFileContent { .. } => {
                     // File content - not used in run_client (only for browse)
                 }
+                ServerMessage::FsHashResponse { .. } => {
+                    // File hash response - not used in run_client (only for browse)
+                }
             }
         }
     });
@@ -496,7 +499,9 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
     ));
 
     // Run the browser with remote filesystem
-    crate::browser::run_browser_with_fs(remote_fs)
+    // Pass remote_fs as both the filesystem trait object and as the concrete type for caching
+    let filesystem: Arc<dyn crate::custom_explorer::Filesystem> = Arc::clone(&remote_fs) as Arc<dyn crate::custom_explorer::Filesystem>;
+    crate::browser::run_browser_with_fs(filesystem, Some(remote_fs))
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
 
     conn.close(0u32.into(), b"done");
