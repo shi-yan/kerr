@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Terminal,
 };
 use std::io;
@@ -41,6 +41,30 @@ enum PreviewMode {
     None,           // Not previewing
     Text,           // Text file preview
     Image,          // Image preview
+}
+
+/// Copy operation state
+#[derive(Clone)]
+enum CopyMode {
+    None,                                           // Not copying
+    Confirming {                                    // Asking for confirmation
+        source: std::path::PathBuf,
+        dest_dir: std::path::PathBuf,
+        direction: CopyDirection,
+        overwrite: bool,                            // Whether destination exists
+    },
+    InProgress {                                    // Copy in progress
+        source: std::path::PathBuf,
+        dest: std::path::PathBuf,
+        total_bytes: u64,
+        transferred_bytes: u64,
+    },
+}
+
+#[derive(Clone)]
+enum CopyDirection {
+    LocalToRemote,
+    RemoteToLocal,
 }
 
 /// Run the interactive file browser with local filesystem
@@ -119,6 +143,9 @@ pub fn run_browser_with_fs(
     let mut preview_mode = PreviewMode::None;
     let mut text_viewer: Option<TextArea> = None;
     let mut image_state: Option<ratatui_image::protocol::StatefulProtocol> = None;
+
+    // Copy mode state
+    let mut copy_mode = CopyMode::None;
 
     // Initialize image picker for terminal
     let mut picker = Picker::from_query_stdio()
@@ -200,6 +227,17 @@ pub fn run_browser_with_fs(
                     render_image_preview(f, f.area(), focused_explorer, &mut image_state);
                 }
             }
+
+            // Render copy popup overlay if in copy mode
+            match &copy_mode {
+                CopyMode::Confirming { source, dest_dir, direction, overwrite } => {
+                    render_copy_confirmation(f, f.area(), source, dest_dir, direction, *overwrite);
+                }
+                CopyMode::InProgress { source, dest, total_bytes, transferred_bytes } => {
+                    render_copy_progress(f, f.area(), source, dest, *total_bytes, *transferred_bytes);
+                }
+                CopyMode::None => {}
+            }
         })?;
 
         // Clear error messages after 3 seconds
@@ -214,10 +252,112 @@ pub fn run_browser_with_fs(
         // Handle input
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match preview_mode {
-                    PreviewMode::None => {
-                        // Normal browser mode
+                // Handle copy mode first (highest priority)
+                match &copy_mode {
+                    CopyMode::Confirming { source, dest_dir, direction, overwrite: _ } => {
                         match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                // User confirmed, start copy
+                                let source = source.clone();
+                                let dest_dir = dest_dir.clone();
+                                let direction = direction.clone();
+
+                                let dest = dest_dir.join(source.file_name().unwrap_or_default());
+
+                                // Get total size for progress tracking
+                                let total_bytes = if source.is_file() {
+                                    std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0)
+                                } else {
+                                    // For directories, we'll start with 0 and update as we go
+                                    0
+                                };
+
+                                // Start in progress mode
+                                copy_mode = CopyMode::InProgress {
+                                    source: source.clone(),
+                                    dest: dest.clone(),
+                                    total_bytes,
+                                    transferred_bytes: 0,
+                                };
+
+                                // Perform the copy in background
+                                let copy_result = match direction {
+                                    CopyDirection::LocalToRemote => {
+                                        // Copy from local to remote (upload)
+                                        if let Some(ref remote_fs) = remote_fs {
+                                            perform_upload(&source, &dest, remote_fs)
+                                        } else {
+                                            Err(io::Error::new(io::ErrorKind::Other, "No remote filesystem"))
+                                        }
+                                    }
+                                    CopyDirection::RemoteToLocal => {
+                                        // Copy from remote to local (download)
+                                        if let Some(ref remote_fs) = remote_fs {
+                                            perform_download(&source, &dest, remote_fs, &cache)
+                                        } else {
+                                            Err(io::Error::new(io::ErrorKind::Other, "No remote filesystem"))
+                                        }
+                                    }
+                                };
+
+                                // Show result
+                                match copy_result {
+                                    Ok(()) => {
+                                        if let Ok(mut error) = error_message.lock() {
+                                            *error = Some(ErrorMessage {
+                                                message: format!("✓ Copied successfully"),
+                                                timestamp: Instant::now(),
+                                            });
+                                        }
+                                        // Refresh target browser
+                                        let refresh_result = match direction {
+                                            CopyDirection::LocalToRemote => {
+                                                // Refresh remote browser
+                                                if let Some(ref mut remote) = remote_explorer {
+                                                    let cwd = remote.cwd().to_path_buf();
+                                                    remote.set_cwd(&cwd)
+                                                } else {
+                                                    Ok(())
+                                                }
+                                            }
+                                            CopyDirection::RemoteToLocal => {
+                                                // Refresh local browser
+                                                let cwd = local_explorer.cwd().to_path_buf();
+                                                local_explorer.set_cwd(&cwd)
+                                            }
+                                        };
+                                        // Ignore refresh errors silently
+                                        let _ = refresh_result;
+                                    }
+                                    Err(e) => {
+                                        if let Ok(mut error) = error_message.lock() {
+                                            *error = Some(ErrorMessage {
+                                                message: format!("Copy failed: {}", e),
+                                                timestamp: Instant::now(),
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Clear copy mode
+                                copy_mode = CopyMode::None;
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                // User cancelled
+                                copy_mode = CopyMode::None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    CopyMode::InProgress { .. } => {
+                        // Can't interrupt copy in progress (for now)
+                    }
+                    CopyMode::None => {
+                        // Not in copy mode, handle normal input
+                        match preview_mode {
+                            PreviewMode::None => {
+                                // Normal browser mode
+                                match key.code {
                             KeyCode::Tab => {
                                 // Switch focus between local and remote
                                 if remote_explorer.is_some() {
@@ -230,6 +370,54 @@ pub fn run_browser_with_fs(
                             KeyCode::Char('q') => break Ok(()),
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break Ok(())
+                            }
+                            KeyCode::Char('c') => {
+                                // Copy file or directory: local->remote or remote->local
+                                if remote_explorer.is_some() {
+                                    let current = match focused_pane {
+                                        FocusedPane::Local => local_explorer.current(),
+                                        FocusedPane::Remote => remote_explorer.as_ref().unwrap().current(),
+                                    };
+
+                                    // Can copy files or directories (but not parent "..")
+                                    if current.is_file() || (current.is_dir() && current.metadata().is_some()) {
+                                        let source = current.path().to_path_buf();
+                                        let (dest_dir, direction) = match focused_pane {
+                                            FocusedPane::Local => {
+                                                // Copying from local to remote
+                                                let remote_current_dir = remote_explorer.as_ref().unwrap().cwd().to_path_buf();
+                                                (remote_current_dir, CopyDirection::LocalToRemote)
+                                            }
+                                            FocusedPane::Remote => {
+                                                // Copying from remote to local
+                                                let local_current_dir = local_explorer.cwd().to_path_buf();
+                                                (local_current_dir, CopyDirection::RemoteToLocal)
+                                            }
+                                        };
+
+                                        // Check if destination already exists
+                                        let dest_path = dest_dir.join(source.file_name().unwrap_or_default());
+                                        let dest_exists = dest_path.exists();
+
+                                        // Show warning if file already exists
+                                        if dest_exists {
+                                            // Update error message to warn user
+                                            if let Ok(mut error) = error_message.lock() {
+                                                *error = Some(ErrorMessage {
+                                                    message: format!("⚠ Destination already exists! Press 'c' again to confirm overwrite."),
+                                                    timestamp: Instant::now(),
+                                                });
+                                            }
+                                        }
+
+                                        copy_mode = CopyMode::Confirming {
+                                            source,
+                                            dest_dir,
+                                            direction,
+                                            overwrite: dest_exists,
+                                        };
+                                    }
+                                }
                             }
                             KeyCode::Char(' ') => {
                                 // Space: preview file or enter directory
@@ -361,6 +549,8 @@ pub fn run_browser_with_fs(
                         }
                     }
                 }
+                    }
+                }
             }
         }
     };
@@ -385,11 +575,19 @@ fn render_status_bar(
 
     // Build status bar content
     let line = if let Some(err) = error {
-        // Show error message in red
-        Line::from(vec![
-            Span::styled(" ERROR: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::styled(&err.message, Style::default().fg(Color::Red)),
-        ])
+        // Check if it's a success message (starts with ✓) or error message
+        if err.message.starts_with("✓") {
+            // Show success message in green
+            Line::from(vec![
+                Span::styled(&err.message, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ])
+        } else {
+            // Show error message in red
+            Line::from(vec![
+                Span::styled(" ERROR: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(&err.message, Style::default().fg(Color::Red)),
+            ])
+        }
     } else {
         // Show normal metadata
         let current = file_explorer.current();
@@ -590,4 +788,251 @@ fn render_image_preview(
 
         frame.render_widget(paragraph, inner);
     }
+}
+
+/// Render the copy confirmation popup
+fn render_copy_confirmation(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    source: &Path,
+    dest_dir: &Path,
+    direction: &CopyDirection,
+    overwrite: bool,
+) {
+    // Create centered popup - larger to accommodate long paths
+    let popup_width = 80.min(area.width.saturating_sub(4));
+    let popup_height = if overwrite { 14 } else { 12 }; // Extra space for warning
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background of the popup area
+    frame.render_widget(Clear, popup_area);
+
+    let direction_str = match direction {
+        CopyDirection::LocalToRemote => "Local → Remote",
+        CopyDirection::RemoteToLocal => "Remote → Local",
+    };
+
+    let filename = source.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let dest_path = dest_dir.join(filename);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Copy File ({}) ", direction_str))
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let mut text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(Color::Cyan)),
+            Span::raw(source.display().to_string()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Destination: ", Style::default().fg(Color::Cyan)),
+            Span::raw(dest_path.display().to_string()),
+        ]),
+        Line::from(""),
+    ];
+
+    // Add warning if overwriting
+    if overwrite {
+        text.push(Line::from(vec![
+            Span::styled("⚠ WARNING: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("Destination already exists!", Style::default().fg(Color::Red)),
+        ]));
+        text.push(Line::from(""));
+    }
+
+    text.push(Line::from(vec![
+        Span::styled("Confirm? ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("[Y]es", Style::default().fg(Color::Green)),
+        Span::raw(" / "),
+        Span::styled("[N]o", Style::default().fg(Color::Red)),
+    ]));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(paragraph, popup_area);
+}
+
+/// Render the copy progress popup
+fn render_copy_progress(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    source: &Path,
+    dest: &Path,
+    total_bytes: u64,
+    transferred_bytes: u64,
+) {
+    // Create centered popup - larger to match confirmation popup
+    let popup_width = 80.min(area.width.saturating_sub(4));
+    let popup_height = 12;
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background of the popup area
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Copying File ")
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    let filename = source.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let percentage = if total_bytes > 0 {
+        (transferred_bytes as f64 / total_bytes as f64 * 100.0) as u64
+    } else {
+        0
+    };
+
+    let progress_width = (popup_width.saturating_sub(4)) as usize;
+    let filled = (progress_width as f64 * percentage as f64 / 100.0) as usize;
+    let empty = progress_width.saturating_sub(filled);
+
+    let progress_bar = format!("[{}{}] {}%",
+        "=".repeat(filled),
+        " ".repeat(empty),
+        percentage
+    );
+
+    let text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("File: ", Style::default().fg(Color::Cyan)),
+            Span::raw(filename),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("To: ", Style::default().fg(Color::Cyan)),
+            Span::raw(dest.display().to_string()),
+        ]),
+        Line::from(""),
+        Line::from(progress_bar),
+        Line::from(""),
+        Line::from(Span::styled("Copying...", Style::default().fg(Color::Yellow))),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(paragraph, popup_area);
+}
+
+/// Perform upload from local to remote
+fn perform_upload(
+    source: &Path,
+    _dest: &Path,
+    _remote_fs: &Arc<RemoteFilesystem>,
+) -> io::Result<()> {
+    // Read local file
+    let _data = std::fs::read(source)?;
+
+    // Upload to remote using the send/recv system
+    // For now, this is a placeholder - you'd need to implement the actual upload protocol
+    // This would involve sending StartUpload, FileChunk, EndUpload messages
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        // TODO: Implement actual upload using the file transfer protocol
+        // For now, just return an error
+        Err(io::Error::new(io::ErrorKind::Other, "Upload not yet implemented - needs file transfer protocol integration"))
+    })
+}
+
+/// Perform download from remote to local
+/// Note: This blocks the current thread but avoids runtime conflicts
+fn perform_download(
+    source: &Path,
+    dest: &Path,
+    remote_fs: &Arc<RemoteFilesystem>,
+    _cache: &Option<FileCache>,
+) -> io::Result<()> {
+    // Use get_or_fetch which handles caching internally
+    let source_path = source.to_path_buf();
+    let dest_path = dest.to_path_buf();
+    let remote_fs = Arc::clone(remote_fs);
+
+    // Create a separate thread with its own runtime to avoid conflicts
+    let handle = std::thread::spawn(move || -> io::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        rt.block_on(async {
+            // Check if source is a file or directory
+            let metadata = remote_fs.metadata(&source_path).await?;
+
+            if metadata.is_dir {
+                // Download directory recursively
+                download_directory_recursive_sync(&source_path, &dest_path, &remote_fs).await
+            } else {
+                // Download single file
+                let data = remote_fs.read_file(&source_path).await?;
+                std::fs::write(&dest_path, data)?;
+                Ok(())
+            }
+        })
+    });
+
+    handle.join()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Thread panicked"))?
+}
+
+/// Recursively download a directory from remote to local (sync version for threading)
+fn download_directory_recursive_sync<'a>(
+    source_dir: &'a Path,
+    dest_dir: &'a Path,
+    remote_fs: &'a Arc<RemoteFilesystem>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + 'a>> {
+    Box::pin(async move {
+        use crate::custom_explorer::Filesystem;
+
+        // Create destination directory
+        std::fs::create_dir_all(dest_dir)?;
+
+        // Read source directory contents
+        let entries = remote_fs.read_dir(source_dir).await?;
+
+        for entry in entries {
+            let source_path = &entry.path;
+            let file_name = source_path.file_name()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid filename"))?;
+            let dest_path = dest_dir.join(file_name);
+
+            if entry.is_dir {
+                // Recursively copy subdirectory
+                download_directory_recursive_sync(source_path, &dest_path, remote_fs).await?;
+            } else {
+                // Download file
+                let data = remote_fs.read_file(source_path).await?;
+                std::fs::write(&dest_path, data)?;
+            }
+        }
+
+        Ok(())
+    })
 }
