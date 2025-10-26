@@ -18,7 +18,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the Kerr server and accept incoming connections
-    Serve,
+    Serve {
+        /// Register this connection with the backend server using the provided alias
+        #[arg(long)]
+        register: Option<String>,
+    },
     /// Connect to a Kerr server
     Connect {
         /// Connection string from the server
@@ -50,6 +54,12 @@ enum Commands {
         /// Optional connection string to browse remote filesystem
         connection_string: Option<String>,
     },
+    /// Login with Google OAuth2
+    Login,
+    /// Logout and invalidate the current session
+    Logout,
+    /// List all registered connections
+    Ls,
 }
 
 #[tokio::main]
@@ -57,8 +67,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve => {
-            kerr::server::run_server().await?;
+        Commands::Serve { register } => {
+            kerr::server::run_server(register).await?;
         }
         Commands::Connect { connection_string } => {
             kerr::client::run_client(connection_string).await?;
@@ -77,6 +87,41 @@ async fn main() -> Result<()> {
                 // Browse local filesystem
                 kerr::browser::run_browser()
                     .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
+            }
+        }
+        Commands::Login => {
+            kerr::auth::login().await?;
+        }
+        Commands::Logout => {
+            kerr::auth::logout().await?;
+        }
+        Commands::Ls => {
+            // Fetch connections from backend
+            let connections_response = kerr::auth::fetch_connections().await?;
+
+            // Show the interactive list
+            match kerr::connections_list::run_connections_list(connections_response.connections)? {
+                Some(selected_connection) => {
+                    // User selected a connection, print the commands
+                    println!("\n╔══════════════════════════════════════════════════════════════╗");
+                    println!("║             Connection Commands                              ║");
+                    println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+                    let alias = selected_connection.alias.as_deref().unwrap_or("(no alias)");
+                    let host = &selected_connection.host_name;
+                    println!("Selected: {} @ {}\n", alias, host);
+
+                    let conn_str = &selected_connection.connection_string;
+                    println!("Commands:");
+                    println!("  Connect: kerr connect {}", conn_str);
+                    println!("  Send:    kerr send {} <local> <remote>", conn_str);
+                    println!("  Pull:    kerr pull {} <remote> <local>", conn_str);
+                    println!("  Browse:  kerr browse {}", conn_str);
+                    println!();
+                }
+                None => {
+                    println!("No connection selected.");
+                }
             }
         }
     }

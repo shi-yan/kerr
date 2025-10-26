@@ -29,7 +29,31 @@ impl std::fmt::Display for PtyError {
 
 impl std::error::Error for PtyError {}
 
-pub async fn run_server() -> Result<()> {
+/// Register the connection with the backend server
+async fn register_with_backend(connection_string: &str, alias: Option<String>) -> Result<String> {
+    // Get hostname
+    let host_name = hostname::get()
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to get hostname: {}", e)))?
+        .to_string_lossy()
+        .to_string();
+
+    // Call the auth module to register
+    crate::auth::register_connection(
+        connection_string.to_string(),
+        alias,
+        host_name,
+    )
+    .await?;
+
+    Ok(connection_string.to_string())
+}
+
+/// Unregister the connection from the backend server
+async fn unregister_from_backend(alias: String) -> Result<()> {
+    crate::auth::unregister_connection(alias).await
+}
+
+pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let endpoint = Endpoint::builder().discovery_n0().bind().await?;
 
     // Build our protocol handler and add our protocol, identified by its ALPN, and spawn the node.
@@ -42,6 +66,23 @@ pub async fn run_server() -> Result<()> {
 
     // Encode the address as a compressed connection string (JSON -> gzip -> base64)
     let connection_string = crate::encode_connection_string(&addr);
+
+    // Register with backend if alias was provided
+    let registered_alias = if let Some(alias) = register_alias {
+        match register_with_backend(&connection_string, Some(alias.clone())).await {
+            Ok(_) => {
+                println!("\n✓ Successfully registered with backend server");
+                Some(alias)
+            }
+            Err(e) => {
+                eprintln!("\n✗ Failed to register with backend: {}", e);
+                eprintln!("  Continuing without registration...\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Build the connection commands
     let connect_command = format!("kerr connect {}", connection_string);
@@ -161,6 +202,18 @@ pub async fn run_server() -> Result<()> {
         }
         _ = keyboard_task => {
             println!("\r\nShutting down...");
+        }
+    }
+
+    // Unregister from backend if we registered
+    if let Some(alias) = registered_alias {
+        match unregister_from_backend(alias).await {
+            Ok(()) => {
+                println!("✓ Successfully unregistered from backend server");
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to unregister from backend: {}", e);
+            }
         }
     }
 

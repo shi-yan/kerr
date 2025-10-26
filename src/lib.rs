@@ -6,6 +6,8 @@ pub mod client;
 pub mod transfer;
 pub mod browser;
 pub mod custom_explorer;
+pub mod auth;
+pub mod connections_list;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
