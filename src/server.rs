@@ -89,6 +89,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let send_command = format!("kerr send {}", connection_string);
     let pull_command = format!("kerr pull {}", connection_string);
     let browse_command = format!("kerr browse {}", connection_string);
+    let ping_command = format!("kerr ping {}", connection_string);
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Kerr Server Online                        ║");
@@ -98,8 +99,9 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     println!("  Send:    {} <local> <remote>", send_command);
     println!("  Pull:    {} <remote> <local>", pull_command);
     println!("  Browse:  {}", browse_command);
+    println!("  Ping:    {}", ping_command);
     println!("\n─────────────────────────────────────────────────────────────────");
-    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | Ctrl+C to stop");
+    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | p[i]ng | Ctrl+C");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
@@ -110,6 +112,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let send_clone = send_command.clone();
     let pull_clone = pull_command.clone();
     let browse_clone = browse_command.clone();
+    let ping_clone = ping_command.clone();
 
     let keyboard_task = tokio::task::spawn(async move {
         let mut event_stream = EventStream::new();
@@ -170,6 +173,21 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
                                     Ok(mut clipboard) => {
                                         if clipboard.set_text(&browse_clone).is_ok() {
                                             println!("\r\n✓ Browse command copied to clipboard!\r\n");
+                                        } else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 'i' key press to copy ping command
+                            (KeyCode::Char('i'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&ping_clone).is_ok() {
+                                            println!("\r\n✓ Ping command copied to clipboard!\r\n");
                                         } else {
                                             eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
                                         }

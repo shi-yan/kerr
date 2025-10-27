@@ -92,7 +92,7 @@ pub async fn run_client(connection_string: String) -> Result<()> {
     println!("Press Ctrl+D to disconnect.");
 
     // Open a bidirectional QUIC stream
-    let (mut send, mut recv) = conn.open_bi().await.e()?;
+    let (mut send, recv) = conn.open_bi().await.e()?;
 
     // Send Hello message to indicate this is a shell session
     let config = config::standard();
@@ -245,6 +245,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 }
                 ServerMessage::FsError { .. } => {
                     // Filesystem error - not used in run_client (only for browse)
+                }
+                ServerMessage::PingResponse { .. } => {
+                    // Ping response - not used in run_client (only for ping test)
                 }
             }
         }
