@@ -458,9 +458,120 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
 }
 
 /// Pull a file or directory from the server
-pub async fn pull_file(_connection_string: String, remote_path: String, local_path: String) -> Result<()> {
-    println!("Pull functionality not yet implemented");
-    println!("Would pull {} to {}", remote_path, local_path);
+pub async fn pull_file(connection_string: String, remote_path: String, local_path: String) -> Result<()> {
+    use std::path::Path;
+    use std::fs;
+    use std::io::Write;
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    // Decode the compressed connection string (base64 -> gzip -> JSON)
+    let addr = crate::decode_connection_string(&connection_string)
+        .expect("Failed to decode connection string");
+
+    println!("Connecting to server...");
+    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let conn = endpoint.connect(addr, ALPN).await?;
+    let (mut send, mut recv) = conn.open_bi().await.e()?;
+
+    // Send Hello message to indicate this is a file transfer session
+    let config = config::standard();
+    let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::FileTransfer };
+    let encoded = bincode::encode_to_vec(&hello_msg, config).unwrap();
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await.e()?;
+    send.write_all(&encoded).await.e()?;
+
+    // Send RequestDownload message
+    let request_msg = ClientMessage::RequestDownload {
+        path: remote_path.clone(),
+    };
+    let encoded = bincode::encode_to_vec(&request_msg, config).unwrap();
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await.e()?;
+    send.write_all(&encoded).await.e()?;
+
+    // Wait for StartDownload or Error
+    let mut len_bytes = [0u8; 4];
+    recv.read_exact(&mut len_bytes).await.e()?;
+    let msg_len = u32::from_be_bytes(len_bytes) as usize;
+    let mut msg_bytes = vec![0u8; msg_len];
+    recv.read_exact(&mut msg_bytes).await.e()?;
+
+    let (response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
+        .expect("Failed to decode server response");
+
+    let (total_size, _is_dir) = match response {
+        ServerMessage::StartDownload { size, is_dir } => (size, is_dir),
+        ServerMessage::Error { message } => {
+            eprintln!("Server error: {}", message);
+            return Ok(());
+        }
+        _ => {
+            eprintln!("Unexpected server response");
+            return Ok(());
+        }
+    };
+
+    println!("Downloading {} ({} bytes)...", remote_path, total_size);
+
+    // Ensure parent directory exists
+    let local = Path::new(&local_path);
+    crate::transfer::ensure_parent_dir(local)
+        .expect("Failed to create parent directory");
+
+    // Open file for writing
+    let mut output_file = fs::File::create(&local_path)
+        .expect("Failed to create output file");
+
+    // Create progress bar
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .progress_chars("#>-"));
+
+    let mut bytes_received = 0u64;
+
+    // Receive file chunks
+    loop {
+        // Read message length
+        let mut len_bytes = [0u8; 4];
+        recv.read_exact(&mut len_bytes).await.e()?;
+        let msg_len = u32::from_be_bytes(len_bytes) as usize;
+        let mut msg_bytes = vec![0u8; msg_len];
+        recv.read_exact(&mut msg_bytes).await.e()?;
+
+        let (msg, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
+            .expect("Failed to decode server message");
+
+        match msg {
+            ServerMessage::FileChunk { data } => {
+                output_file.write_all(&data)
+                    .expect("Failed to write to file");
+                bytes_received += data.len() as u64;
+                pb.set_position(bytes_received);
+            }
+            ServerMessage::EndDownload => {
+                pb.finish_with_message("Download complete!");
+                break;
+            }
+            ServerMessage::Error { message } => {
+                eprintln!("Server error: {}", message);
+                pb.finish_with_message("Download failed");
+                return Ok(());
+            }
+            _ => {
+                eprintln!("Unexpected server message during download");
+                break;
+            }
+        }
+    }
+
+    println!("Downloaded {} to {}", remote_path, local_path);
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+
     Ok(())
 }
 
