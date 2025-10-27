@@ -280,6 +280,10 @@ impl ProtocolHandler for KerrServer {
                 println!("\r\nStarting file browser session for {node_id}\r");
                 Self::handle_file_browser_session(node_id, send, recv).await
             }
+            crate::SessionType::Ping => {
+                println!("\r\nStarting ping test session for {node_id}\r");
+                Self::handle_ping_session(node_id, send, recv).await
+            }
         }
     }
 }
@@ -693,7 +697,134 @@ impl KerrServer {
                 }
                 crate::ClientMessage::RequestDownload { path } => {
                     println!("\r\nClient requested download: {}\r", path);
-                    // TODO: Implement file download
+
+                    // Check if path exists
+                    let file_path = Path::new(&path);
+                    if !file_path.exists() {
+                        let err_msg = crate::ServerMessage::Error {
+                            message: format!("Path does not exist: {}", path),
+                        };
+                        eprintln!("\r\nError: Path does not exist: {}\r", path);
+                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            let len = (encoded.len() as u32).to_be_bytes();
+                            let mut full_msg = Vec::new();
+                            full_msg.extend_from_slice(&len);
+                            full_msg.extend_from_slice(&encoded);
+                            let _ = send_tx.send(full_msg);
+                        }
+                        continue;
+                    }
+
+                    let is_dir = file_path.is_dir();
+
+                    // Calculate total size
+                    let total_size = match crate::transfer::calculate_size(file_path) {
+                        Ok(size) => size,
+                        Err(e) => {
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to calculate size: {}", e),
+                            };
+                            eprintln!("\r\nError calculating size: {}\r", e);
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            continue;
+                        }
+                    };
+
+                    println!("\r\nSending file: {} ({} bytes, is_dir: {})\r", path, total_size, is_dir);
+
+                    // Send StartDownload message
+                    let start_msg = crate::ServerMessage::StartDownload {
+                        size: total_size,
+                        is_dir,
+                    };
+                    if let Ok(encoded) = bincode::encode_to_vec(&start_msg, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        let mut full_msg = Vec::new();
+                        full_msg.extend_from_slice(&len);
+                        full_msg.extend_from_slice(&encoded);
+                        let _ = send_tx.send(full_msg);
+                    }
+
+                    // Get all files to send
+                    let files = match crate::transfer::get_files_recursive(file_path) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to read files: {}", e),
+                            };
+                            eprintln!("\r\nError reading files: {}\r", e);
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Send file chunks
+                    use std::io::Read;
+                    let mut bytes_sent = 0u64;
+
+                    for file in files {
+                        let mut f = match std::fs::File::open(&file) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                eprintln!("\r\nFailed to open file {:?}: {}\r", file, e);
+                                continue;
+                            }
+                        };
+
+                        let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
+
+                        loop {
+                            let n = match f.read(&mut buffer) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    eprintln!("\r\nFailed to read file {:?}: {}\r", file, e);
+                                    break;
+                                }
+                            };
+
+                            if n == 0 {
+                                break;
+                            }
+
+                            let chunk_msg = crate::ServerMessage::FileChunk {
+                                data: buffer[..n].to_vec(),
+                            };
+
+                            if let Ok(encoded) = bincode::encode_to_vec(&chunk_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+
+                            bytes_sent += n as u64;
+                        }
+                    }
+
+                    // Send EndDownload message
+                    let end_msg = crate::ServerMessage::EndDownload;
+                    if let Ok(encoded) = bincode::encode_to_vec(&end_msg, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        let mut full_msg = Vec::new();
+                        full_msg.extend_from_slice(&len);
+                        full_msg.extend_from_slice(&encoded);
+                        let _ = send_tx.send(full_msg);
+                    }
+
+                    println!("\r\nDownload completed: {} ({} bytes sent)\r", path, bytes_sent);
                 }
                 crate::ClientMessage::Disconnect => {
                     println!("\r\nClient requested disconnect\r");
@@ -924,6 +1055,67 @@ impl KerrServer {
         }
 
         println!("\r\nFile browser session closed for {node_id}\r");
+        Ok(())
+    }
+
+    async fn handle_ping_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        let config = bincode::config::standard();
+
+        println!("\r\nPing session started for {node_id}\r");
+
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message data
+            let mut msg_bytes = vec![0u8; len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                break;
+            }
+
+            // Deserialize message
+            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok((m, _)) => m,
+                Err(e) => {
+                    eprintln!("\r\nFailed to deserialize message: {}\r", e);
+                    continue;
+                }
+            };
+
+            match msg {
+                crate::ClientMessage::PingRequest { data } => {
+                    // Echo the data back
+                    let response = crate::ServerMessage::PingResponse { data };
+
+                    if let Ok(encoded) = bincode::encode_to_vec(&response, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        if send.write_all(&len).await.is_err() {
+                            break;
+                        }
+                        if send.write_all(&encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                crate::ClientMessage::Disconnect => {
+                    println!("\r\nClient requested disconnect\r");
+                    break;
+                }
+                _ => {
+                    eprintln!("\r\nUnexpected message type in ping session\r");
+                }
+            }
+        }
+
+        println!("\r\nPing session closed for {node_id}\r");
         Ok(())
     }
 }
