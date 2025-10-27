@@ -92,7 +92,7 @@ pub async fn run_client(connection_string: String) -> Result<()> {
     println!("Press Ctrl+D to disconnect.");
 
     // Open a bidirectional QUIC stream
-    let (mut send, recv) = conn.open_bi().await.e()?;
+    let (mut send, mut recv) = conn.open_bi().await.e()?;
 
     // Send Hello message to indicate this is a shell session
     let config = config::standard();
