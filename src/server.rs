@@ -280,6 +280,10 @@ impl ProtocolHandler for KerrServer {
                 println!("\r\nStarting file browser session for {node_id}\r");
                 Self::handle_file_browser_session(node_id, send, recv).await
             }
+            crate::SessionType::Ping => {
+                println!("\r\nStarting ping test session for {node_id}\r");
+                Self::handle_ping_session(node_id, send, recv).await
+            }
         }
     }
 }
@@ -1051,6 +1055,67 @@ impl KerrServer {
         }
 
         println!("\r\nFile browser session closed for {node_id}\r");
+        Ok(())
+    }
+
+    async fn handle_ping_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        let config = bincode::config::standard();
+
+        println!("\r\nPing session started for {node_id}\r");
+
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message data
+            let mut msg_bytes = vec![0u8; len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                break;
+            }
+
+            // Deserialize message
+            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok((m, _)) => m,
+                Err(e) => {
+                    eprintln!("\r\nFailed to deserialize message: {}\r", e);
+                    continue;
+                }
+            };
+
+            match msg {
+                crate::ClientMessage::PingRequest { data } => {
+                    // Echo the data back
+                    let response = crate::ServerMessage::PingResponse { data };
+
+                    if let Ok(encoded) = bincode::encode_to_vec(&response, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        if send.write_all(&len).await.is_err() {
+                            break;
+                        }
+                        if send.write_all(&encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                crate::ClientMessage::Disconnect => {
+                    println!("\r\nClient requested disconnect\r");
+                    break;
+                }
+                _ => {
+                    eprintln!("\r\nUnexpected message type in ping session\r");
+                }
+            }
+        }
+
+        println!("\r\nPing session closed for {node_id}\r");
         Ok(())
     }
 }

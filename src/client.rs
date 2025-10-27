@@ -575,6 +575,135 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     Ok(())
 }
 
+/// Test network performance with increasing payload sizes
+pub async fn ping_test(connection_string: String) -> Result<()> {
+    use std::time::Instant;
+
+    // Decode the compressed connection string (base64 -> gzip -> JSON)
+    let addr = crate::decode_connection_string(&connection_string)
+        .expect("Failed to decode connection string");
+
+    println!("Connecting to server...");
+    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let conn = endpoint.connect(addr, ALPN).await?;
+    let (mut send, mut recv) = conn.open_bi().await.e()?;
+
+    // Send Hello message to indicate this is a ping test session
+    let config = config::standard();
+    let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::Ping };
+    let encoded = bincode::encode_to_vec(&hello_msg, config).unwrap();
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await.e()?;
+    send.write_all(&encoded).await.e()?;
+
+    println!("\n╔══════════════════════════════════════════════════════════════════════╗");
+    println!("║                    Network Performance Test                          ║");
+    println!("╚══════════════════════════════════════════════════════════════════════╝\n");
+    println!("{:<12} {:<15} {:<15} {:<15}", "Payload Size", "Round-Trip", "Throughput", "Effective BW");
+    println!("{}", "─".repeat(70));
+
+    // Test with exponentially growing payload sizes: 0, 1KB, 4KB, 16KB, 64KB, 256KB, 1MB
+    let sizes = vec![0, 1024, 4096, 16384, 65536, 262144, 1048576];
+
+    for size in sizes {
+        // Create payload
+        let payload = vec![0u8; size];
+
+        // Start timer
+        let start = Instant::now();
+
+        // Send ping request
+        let ping_msg = ClientMessage::PingRequest { data: payload };
+        let encoded = bincode::encode_to_vec(&ping_msg, config).unwrap();
+        let len = (encoded.len() as u32).to_be_bytes();
+        send.write_all(&len).await.e()?;
+        send.write_all(&encoded).await.e()?;
+
+        // Receive response
+        let mut len_bytes = [0u8; 4];
+        recv.read_exact(&mut len_bytes).await.e()?;
+        let msg_len = u32::from_be_bytes(len_bytes) as usize;
+        let mut msg_bytes = vec![0u8; msg_len];
+        recv.read_exact(&mut msg_bytes).await.e()?;
+
+        // Stop timer
+        let elapsed = start.elapsed();
+
+        // Decode response
+        let (response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
+            .expect("Failed to decode server response");
+
+        match response {
+            ServerMessage::PingResponse { data } => {
+                // Verify we got the same size back
+                if data.len() != size {
+                    eprintln!("Warning: Expected {} bytes back, got {}", size, data.len());
+                }
+
+                // Calculate metrics
+                let rtt_ms = elapsed.as_secs_f64() * 1000.0;
+
+                // Total bytes transferred (both directions, including protocol overhead)
+                let encoded_size = encoded.len();
+                let response_size = msg_bytes.len() + 4; // +4 for length prefix
+                let total_bytes = encoded_size + 4 + response_size; // +4 for request length prefix
+
+                // Throughput in MB/s (total data / time)
+                let throughput_mbps = if elapsed.as_secs_f64() > 0.0 {
+                    (total_bytes as f64) / elapsed.as_secs_f64() / 1_000_000.0
+                } else {
+                    0.0
+                };
+
+                // Effective bandwidth (payload only, both directions) in Mbps
+                let effective_bw_mbps = if elapsed.as_secs_f64() > 0.0 {
+                    (size as f64 * 2.0 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0
+                } else {
+                    0.0
+                };
+
+                // Format size nicely
+                let size_str = if size == 0 {
+                    "0 B".to_string()
+                } else if size < 1024 {
+                    format!("{} B", size)
+                } else if size < 1048576 {
+                    format!("{} KB", size / 1024)
+                } else {
+                    format!("{} MB", size / 1048576)
+                };
+
+                println!(
+                    "{:<12} {:<15} {:<15} {:<15}",
+                    size_str,
+                    format!("{:.2} ms", rtt_ms),
+                    format!("{:.2} MB/s", throughput_mbps),
+                    format!("{:.2} Mbps", effective_bw_mbps)
+                );
+            }
+            _ => {
+                eprintln!("Unexpected server response");
+                break;
+            }
+        }
+    }
+
+    println!("\n{}", "─".repeat(70));
+    println!("Test complete!\n");
+
+    // Send disconnect
+    let disconnect_msg = ClientMessage::Disconnect;
+    let encoded = bincode::encode_to_vec(&disconnect_msg, config).unwrap();
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await.e()?;
+    send.write_all(&encoded).await.e()?;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+
+    Ok(())
+}
+
 /// Browse remote filesystem
 pub async fn browse_remote(connection_string: String) -> Result<()> {
     use std::sync::Arc;

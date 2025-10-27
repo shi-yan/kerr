@@ -18,6 +18,8 @@ pub enum SessionType {
     FileTransfer,
     /// File browser session
     FileBrowser,
+    /// Network performance testing session
+    Ping,
 }
 
 /// Messages sent from client to server
@@ -49,6 +51,8 @@ pub enum ClientMessage {
     FsReadFile { path: String },
     /// Request file hash (for file browser caching)
     FsHashFile { path: String },
+    /// Ping request with payload
+    PingRequest { data: Vec<u8> },
 }
 
 /// Messages sent from server to client
@@ -80,6 +84,8 @@ pub enum ServerMessage {
     FsHashResponse { hash: String },
     /// Filesystem error notification (for file browser UI feedback)
     FsError { message: String },
+    /// Ping response echoing back the payload
+    PingResponse { data: Vec<u8> },
 }
 
 /// ALPN for the Kerr protocol

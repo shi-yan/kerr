@@ -54,6 +54,11 @@ enum Commands {
         /// Optional connection string to browse remote filesystem
         connection_string: Option<String>,
     },
+    /// Test network performance with increasing payload sizes
+    Ping {
+        /// Connection string from the server
+        connection_string: String,
+    },
     /// Login with Google OAuth2
     Login,
     /// Logout and invalidate the current session
@@ -89,6 +94,9 @@ async fn main() -> Result<()> {
                     .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
             }
         }
+        Commands::Ping { connection_string } => {
+            kerr::client::ping_test(connection_string).await?;
+        }
         Commands::Login => {
             kerr::auth::login().await?;
         }
@@ -117,6 +125,7 @@ async fn main() -> Result<()> {
                     println!("  Send:    kerr send {} <local> <remote>", conn_str);
                     println!("  Pull:    kerr pull {} <remote> <local>", conn_str);
                     println!("  Browse:  kerr browse {}", conn_str);
+                    println!("  Ping:    kerr ping {}", conn_str);
                     println!();
                 }
                 None => {
