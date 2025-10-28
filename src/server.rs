@@ -508,9 +508,10 @@ impl KerrServer {
             }
         }
 
-        // Clean up
-        pty_to_client.abort();
-        send_task.abort();
+        // Clean up - ensure all queued messages are sent before closing
+        pty_to_client.abort(); // PTY task should already be done, but ensure it's aborted
+        drop(send_tx); // Close the send channel so send_task knows to finish
+        let _ = send_task.await; // Wait for send_task to finish sending all queued messages
         println!("\r\nConnection closed for {node_id}\r");
 
         Ok(())
