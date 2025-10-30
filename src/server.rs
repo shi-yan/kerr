@@ -11,6 +11,7 @@ use std::io::Write as IoWrite;
 use std::path::Path;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{ClientMessage, ServerMessage, ALPN};
+use crate::debug_log;
 use arboard::Clipboard;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
@@ -288,6 +289,8 @@ impl ProtocolHandler for KerrServer {
         match session_type {
             crate::SessionType::Shell => {
                 println!("\r\nStarting shell session for {node_id}\r");
+                let session_id = node_id.to_string();
+                debug_log::log_session_start(&session_id[..8]);
                 Self::handle_shell_session(node_id, send, recv).await
             }
             crate::SessionType::FileTransfer => {
@@ -312,6 +315,10 @@ impl KerrServer {
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<(), AcceptError> {
+        // Create short session ID for logging (first 8 chars of node_id)
+        let session_id = node_id.to_string();
+        let session_id = &session_id[..8];
+
         // Create a PTY system
         let pty_system = native_pty_system();
 
@@ -362,25 +369,45 @@ impl KerrServer {
         let (pty_ended_tx, mut pty_ended_rx) = tokio::sync::mpsc::channel::<()>(1);
 
         // Spawn task to write messages to send stream
+        let session_id_send = session_id.to_string();
         let send_task = tokio::spawn(async move {
+            debug_log::log_send_task_started(&session_id_send);
+            let mut msg_count = 0;
+
             while let Some(data) = send_rx.recv().await {
-                if send.write_all(&data).await.is_err() {
-                    break;
+                msg_count += 1;
+                debug_log::log_quic_write_start(&session_id_send, data.len());
+
+                match send.write_all(&data).await {
+                    Ok(()) => {
+                        debug_log::log_quic_write_done(&session_id_send, data.len());
+                    }
+                    Err(e) => {
+                        debug_log::log_quic_write_failed(&session_id_send, data.len(), &e.to_string());
+                        break;
+                    }
                 }
             }
+
+            debug_log::log_send_task_ended(&session_id_send, &format!("channel_closed, sent {} messages", msg_count));
         });
 
         // Spawn task to read from PTY and send to client
         let send_tx_clone = send_tx.clone();
+        let session_id_pty = session_id.to_string();
         let pty_to_client = tokio::spawn(async move {
+            debug_log::log_pty_task_started(&session_id_pty);
             let mut buffer = [0u8; 8192];
             let config = bincode::config::standard();
             let mut pty_ended = false;
+            let mut total_bytes_read = 0;
+            let mut read_count = 0;
 
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
                         // EOF - bash has exited
+                        debug_log::log_pty_eof(&session_id_pty);
                         println!("\r\nBash exited, notifying client\r");
                         pty_ended = true;
 
@@ -393,11 +420,19 @@ impl KerrServer {
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
                             full_msg.extend_from_slice(&encoded);
-                            let _ = send_tx_clone.send(full_msg);
+
+                            debug_log::log_msg_queued(&session_id_pty, "Error", full_msg.len());
+                            if send_tx_clone.send(full_msg).is_err() {
+                                debug_log::log_queue_send_failed(&session_id_pty, "Error");
+                            }
                         }
                         break;
                     }
                     Ok(n) => {
+                        read_count += 1;
+                        total_bytes_read += n;
+                        debug_log::log_pty_read(&session_id_pty, n);
+
                         let msg = ServerMessage::Output {
                             data: buffer[..n].to_vec(),
                         };
@@ -408,14 +443,22 @@ impl KerrServer {
                                 full_msg.extend_from_slice(&len);
                                 full_msg.extend_from_slice(&encoded);
 
+                                debug_log::log_msg_queued(&session_id_pty, "Output", full_msg.len());
                                 if send_tx_clone.send(full_msg).is_err() {
+                                    debug_log::log_queue_send_failed(&session_id_pty, "Output");
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                debug_log::log_pty_error(&session_id_pty, &format!("encode failed: {}", e));
+                                break;
+                            }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        debug_log::log_pty_error(&session_id_pty, &e.to_string());
+                        break;
+                    }
                 }
             }
 
@@ -423,6 +466,8 @@ impl KerrServer {
             if pty_ended {
                 let _ = pty_ended_tx.send(()).await;
             }
+
+            debug_log::log_pty_task_ended(&session_id_pty, &format!("total_reads={}, total_bytes={}", read_count, total_bytes_read));
         });
 
         // Main loop: receive from client and write to PTY, or exit if PTY ends
@@ -464,6 +509,7 @@ impl KerrServer {
 
                             match msg {
                                 ClientMessage::KeyEvent { data } => {
+                                    debug_log::log_client_input(session_id, "KeyEvent", data.len());
                                     // Write key event to PTY
                                     if let Err(e) = writer.write_all(&data) {
                                         eprintln!("\r\nFailed to write to PTY: {}\r", e);
@@ -475,6 +521,7 @@ impl KerrServer {
                                     }
                                 }
                                 ClientMessage::Resize { cols, rows } => {
+                                    debug_log::log_client_input(session_id, "Resize", 0);
                                     // Resize the PTY
                                     let new_size = PtySize {
                                         rows,
@@ -491,6 +538,7 @@ impl KerrServer {
                                     }
                                 }
                                 ClientMessage::Disconnect => {
+                                    debug_log::log_client_input(session_id, "Disconnect", 0);
                                     println!("\r\nClient requested disconnect\r");
                                     break;
                                 }
@@ -512,6 +560,8 @@ impl KerrServer {
         pty_to_client.abort(); // PTY task should already be done, but ensure it's aborted
         drop(send_tx); // Close the send channel so send_task knows to finish
         let _ = send_task.await; // Wait for send_task to finish sending all queued messages
+
+        debug_log::log_session_end(session_id);
         println!("\r\nConnection closed for {node_id}\r");
 
         Ok(())
