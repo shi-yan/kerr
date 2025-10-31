@@ -54,6 +54,15 @@ enum Commands {
         /// Optional connection string to browse remote filesystem
         connection_string: Option<String>,
     },
+    /// Create a TCP relay proxy to forward local port to remote port
+    Relay {
+        /// Connection string from the server
+        connection_string: String,
+        /// Local port to listen on
+        local_port: u16,
+        /// Remote port to forward to
+        remote_port: u16,
+    },
     /// Login with Google OAuth2
     Login,
     /// Logout and invalidate the current session
@@ -88,6 +97,9 @@ async fn main() -> Result<()> {
                 kerr::browser::run_browser()
                     .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Browser error: {}", e)))?;
             }
+        }
+        Commands::Relay { connection_string, local_port, remote_port } => {
+            kerr::client::run_tcp_relay(&connection_string, local_port, remote_port).await?;
         }
         Commands::Login => {
             kerr::auth::login().await?;

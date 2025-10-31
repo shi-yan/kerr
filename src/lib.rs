@@ -8,6 +8,7 @@ pub mod browser;
 pub mod custom_explorer;
 pub mod auth;
 pub mod connections_list;
+pub mod traffic_ui;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
@@ -18,6 +19,8 @@ pub enum SessionType {
     FileTransfer,
     /// File browser session
     FileBrowser,
+    /// TCP relay session
+    TcpRelay,
 }
 
 /// Messages sent from client to server
@@ -49,6 +52,12 @@ pub enum ClientMessage {
     FsReadFile { path: String },
     /// Request file hash (for file browser caching)
     FsHashFile { path: String },
+    /// Open a new TCP connection on the remote server
+    TcpOpen { stream_id: u32, destination_port: u16 },
+    /// Send TCP data to a remote connection
+    TcpData { stream_id: u32, data: Vec<u8> },
+    /// Close a TCP connection
+    TcpClose { stream_id: u32 },
 }
 
 /// Messages sent from server to client
@@ -80,6 +89,12 @@ pub enum ServerMessage {
     FsHashResponse { hash: String },
     /// Filesystem error notification (for file browser UI feedback)
     FsError { message: String },
+    /// TCP connection opened successfully (or failed)
+    TcpOpenResponse { stream_id: u32, success: bool, error: Option<String> },
+    /// TCP data received from remote server
+    TcpDataResponse { stream_id: u32, data: Vec<u8> },
+    /// TCP connection closed or error occurred
+    TcpCloseResponse { stream_id: u32, error: Option<String> },
 }
 
 /// ALPN for the Kerr protocol

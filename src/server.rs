@@ -89,6 +89,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let send_command = format!("kerr send {}", connection_string);
     let pull_command = format!("kerr pull {}", connection_string);
     let browse_command = format!("kerr browse {}", connection_string);
+    let relay_command = format!("kerr relay {}", connection_string);
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Kerr Server Online                        ║");
@@ -98,8 +99,9 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     println!("  Send:    {} <local> <remote>", send_command);
     println!("  Pull:    {} <remote> <local>", pull_command);
     println!("  Browse:  {}", browse_command);
+    println!("  Relay:   {} <local_port> <remote_port>", relay_command);
     println!("\n─────────────────────────────────────────────────────────────────");
-    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | Ctrl+C to stop");
+    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | Ctrl+C");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
@@ -110,6 +112,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let send_clone = send_command.clone();
     let pull_clone = pull_command.clone();
     let browse_clone = browse_command.clone();
+    let relay_clone = relay_command.clone();
 
     let keyboard_task = tokio::task::spawn(async move {
         let mut event_stream = EventStream::new();
@@ -170,6 +173,21 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
                                     Ok(mut clipboard) => {
                                         if clipboard.set_text(&browse_clone).is_ok() {
                                             println!("\r\n✓ Browse command copied to clipboard!\r\n");
+                                        } else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 'r' key press to copy relay command
+                            (KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&relay_clone).is_ok() {
+                                            println!("\r\n✓ Relay command copied to clipboard!\r\n");
                                         } else {
                                             eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
                                         }
@@ -279,6 +297,10 @@ impl ProtocolHandler for KerrServer {
             crate::SessionType::FileBrowser => {
                 println!("\r\nStarting file browser session for {node_id}\r");
                 Self::handle_file_browser_session(node_id, send, recv).await
+            }
+            crate::SessionType::TcpRelay => {
+                println!("\r\nStarting TCP relay session for {node_id}\r");
+                Self::handle_tcp_relay_session(node_id, send, recv).await
             }
         }
     }
@@ -924,6 +946,212 @@ impl KerrServer {
         }
 
         println!("\r\nFile browser session closed for {node_id}\r");
+        Ok(())
+    }
+
+    async fn handle_tcp_relay_session(
+        node_id: iroh::PublicKey,
+        send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        use tokio::net::TcpStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        // Shared state for tracking remote TCP connections
+        let tcp_connections: Arc<Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Wrap send stream in Arc<Mutex> for sharing between tasks
+        let send = Arc::new(Mutex::new(send));
+
+        let config = bincode::config::standard();
+
+        // Main loop to handle client messages
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                break;
+            }
+
+            // Decode message
+            let (msg, _): (crate::ClientMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("\r\nFailed to decode message: {}\r", e);
+                    break;
+                }
+            };
+
+            match msg {
+                crate::ClientMessage::TcpOpen { stream_id, destination_port } => {
+                    println!("\r\nOpening TCP connection {stream_id} to localhost:{destination_port}\r");
+
+                    // Try to connect to remote port
+                    match TcpStream::connect(format!("127.0.0.1:{}", destination_port)).await {
+                        Ok(tcp_stream) => {
+                            // Send success response
+                            let response = crate::ServerMessage::TcpOpenResponse {
+                                stream_id,
+                                success: true,
+                                error: None,
+                            };
+                            let encoded = match bincode::encode_to_vec(&response, config) {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    eprintln!("\r\nFailed to encode TcpOpenResponse: {}\r", e);
+                                    continue;
+                                }
+                            };
+                            let len = (encoded.len() as u32).to_be_bytes();
+
+                            {
+                                let mut send_locked = send.lock().await;
+                                if send_locked.write_all(&len).await.is_err() {
+                                    break;
+                                }
+                                if send_locked.write_all(&encoded).await.is_err() {
+                                    break;
+                                }
+                            }
+
+                            // Create channel for sending data to this TCP connection
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+                            tcp_connections.lock().await.insert(stream_id, tx);
+
+                            let send_for_task = Arc::clone(&send);
+                            let tcp_connections_for_task = Arc::clone(&tcp_connections);
+
+                            // Spawn task to handle this TCP connection
+                            tokio::spawn(async move {
+                                let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+                                // Task to read from remote TCP and send to client
+                                let read_task = {
+                                    let send_for_read = Arc::clone(&send_for_task);
+                                    tokio::spawn(async move {
+                                        let mut buf = vec![0u8; 65536];
+                                        loop {
+                                            match tcp_read.read(&mut buf).await {
+                                                Ok(0) => break, // EOF
+                                                Ok(n) => {
+                                                    // Send data to client
+                                                    let response = crate::ServerMessage::TcpDataResponse {
+                                                        stream_id,
+                                                        data: buf[..n].to_vec(),
+                                                    };
+                                                    let config = bincode::config::standard();
+                                                    let encoded = match bincode::encode_to_vec(&response, config) {
+                                                        Ok(e) => e,
+                                                        Err(_) => break,
+                                                    };
+                                                    let len = (encoded.len() as u32).to_be_bytes();
+
+                                                    let mut send_locked = send_for_read.lock().await;
+                                                    if send_locked.write_all(&len).await.is_err() {
+                                                        break;
+                                                    }
+                                                    if send_locked.write_all(&encoded).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                                Err(_) => break,
+                                            }
+                                        }
+                                    })
+                                };
+
+                                // Task to receive from client and write to remote TCP
+                                let write_task = tokio::spawn(async move {
+                                    while let Some(data) = rx.recv().await {
+                                        if tcp_write.write_all(&data).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+
+                                // Wait for either task to complete
+                                tokio::select! {
+                                    _ = read_task => {}
+                                    _ = write_task => {}
+                                }
+
+                                // Send close response
+                                let close_response = crate::ServerMessage::TcpCloseResponse {
+                                    stream_id,
+                                    error: None,
+                                };
+                                let config = bincode::config::standard();
+                                if let Ok(encoded) = bincode::encode_to_vec(&close_response, config) {
+                                    let len = (encoded.len() as u32).to_be_bytes();
+                                    let mut send_locked = send_for_task.lock().await;
+                                    let _ = send_locked.write_all(&len).await;
+                                    let _ = send_locked.write_all(&encoded).await;
+                                }
+
+                                // Remove from connections map
+                                tcp_connections_for_task.lock().await.remove(&stream_id);
+                                println!("\r\nTCP connection {} closed\r", stream_id);
+                            });
+                        }
+                        Err(e) => {
+                            // Send error response
+                            eprintln!("\r\nFailed to connect to localhost:{}: {}\r", destination_port, e);
+                            let response = crate::ServerMessage::TcpOpenResponse {
+                                stream_id,
+                                success: false,
+                                error: Some(format!("Failed to connect: {}", e)),
+                            };
+                            let encoded = match bincode::encode_to_vec(&response, config) {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    eprintln!("\r\nFailed to encode error response: {}\r", e);
+                                    continue;
+                                }
+                            };
+                            let len = (encoded.len() as u32).to_be_bytes();
+
+                            let mut send_locked = send.lock().await;
+                            if send_locked.write_all(&len).await.is_err() {
+                                break;
+                            }
+                            if send_locked.write_all(&encoded).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                crate::ClientMessage::TcpData { stream_id, data } => {
+                    // Forward data to the appropriate TCP connection
+                    let connections = tcp_connections.lock().await;
+                    if let Some(tx) = connections.get(&stream_id) {
+                        if tx.send(data).await.is_err() {
+                            eprintln!("\r\nFailed to forward data to TCP connection {}\r", stream_id);
+                        }
+                    }
+                }
+                crate::ClientMessage::TcpClose { stream_id } => {
+                    println!("\r\nClosing TCP connection {stream_id}\r");
+                    // Remove connection from map (this will close the channel and terminate the task)
+                    tcp_connections.lock().await.remove(&stream_id);
+                }
+                _ => {
+                    eprintln!("\r\nUnexpected message in TCP relay session\r");
+                }
+            }
+        }
+
+        println!("\r\nTCP relay session closed for {node_id}\r");
         Ok(())
     }
 }

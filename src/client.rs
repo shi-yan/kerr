@@ -246,6 +246,15 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::FsError { .. } => {
                     // Filesystem error - not used in run_client (only for browse)
                 }
+                ServerMessage::TcpOpenResponse { .. } => {
+                    // TCP open response - not used in run_client (only for relay)
+                }
+                ServerMessage::TcpDataResponse { .. } => {
+                    // TCP data response - not used in run_client (only for relay)
+                }
+                ServerMessage::TcpCloseResponse { .. } => {
+                    // TCP close response - not used in run_client (only for relay)
+                }
             }
         }
     });
@@ -509,6 +518,271 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
+
+    Ok(())
+}
+
+/// Run a TCP relay proxy that forwards local port to remote port
+pub async fn run_tcp_relay(
+    connection_string: &str,
+    local_port: u16,
+    remote_port: u16,
+) -> Result<()> {
+    use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Decode connection string and connect to server
+    let node_addr = crate::decode_connection_string(connection_string)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
+
+    let endpoint = iroh::Endpoint::builder()
+        .discovery(iroh::discovery::dns::DnsDiscovery::n0_dns())
+        .bind()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
+
+    let conn = endpoint.connect(node_addr, crate::ALPN)
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to connect: {}", e)))?;
+
+    let (mut send, mut recv) = conn.open_bi()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
+
+    // Send Hello message with TcpRelay session type
+    let hello = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::TcpRelay,
+    };
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(&hello, config)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
+    send.write_all(&encoded).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
+
+    // Traffic counters
+    let upload_bytes = Arc::new(AtomicU64::new(0));
+    let download_bytes = Arc::new(AtomicU64::new(0));
+
+    // Listen on local port
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", local_port))
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to bind to port {}: {}", local_port, e)))?;
+
+    // Start TUI in a blocking task
+    let upload_bytes_ui = Arc::clone(&upload_bytes);
+    let download_bytes_ui = Arc::clone(&download_bytes);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let ui_task = tokio::task::spawn_blocking(move || {
+        crate::traffic_ui::run_traffic_ui(local_port, remote_port, upload_bytes_ui, download_bytes_ui, shutdown_rx)
+    });
+
+    // Shared state for tracking TCP connections
+    let tcp_connections: Arc<Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_stream_id = Arc::new(Mutex::new(1u32));
+
+    // Wrap send stream in Arc<Mutex> for sharing between tasks
+    let send = Arc::new(Mutex::new(send));
+    let send_clone = Arc::clone(&send);
+
+    // Task to handle incoming messages from server
+    let tcp_connections_clone = Arc::clone(&tcp_connections);
+    let download_bytes_recv = Arc::clone(&download_bytes);
+    let recv_task = tokio::spawn(async move {
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+                break;
+            }
+
+            // Decode message
+            let config = bincode::config::standard();
+            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+
+            // Handle server messages
+            match msg {
+                crate::ServerMessage::TcpDataResponse { stream_id, data } => {
+                    // Track download bytes
+                    download_bytes_recv.fetch_add(data.len() as u64, Ordering::Relaxed);
+
+                    // Forward data to local TCP connection
+                    let connections = tcp_connections_clone.lock().await;
+                    if let Some(tx) = connections.get(&stream_id) {
+                        let _ = tx.send(data).await;
+                    }
+                }
+                crate::ServerMessage::TcpCloseResponse { stream_id, error } => {
+                    if let Some(err) = error {
+                        eprintln!("Remote TCP connection {} closed with error: {}", stream_id, err);
+                    }
+                    // Remove connection from map (this will cause the local connection to close)
+                    tcp_connections_clone.lock().await.remove(&stream_id);
+                }
+                crate::ServerMessage::TcpOpenResponse { stream_id, success, error } => {
+                    if !success {
+                        eprintln!("Failed to open remote connection {}: {}", stream_id, error.unwrap_or_default());
+                        tcp_connections_clone.lock().await.remove(&stream_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Accept incoming TCP connections
+    loop {
+        let (tcp_stream, addr) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New connection from {}", addr);
+
+        // Get next stream ID
+        let stream_id = {
+            let mut id = next_stream_id.lock().await;
+            let current = *id;
+            *id += 1;
+            current
+        };
+
+        // Send TcpOpen message
+        let open_msg = crate::ClientMessage::TcpOpen {
+            stream_id,
+            destination_port: remote_port,
+        };
+        let config = bincode::config::standard();
+        let encoded = match bincode::encode_to_vec(&open_msg, config) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Failed to encode TcpOpen: {}", e);
+                continue;
+            }
+        };
+        let len = (encoded.len() as u32).to_be_bytes();
+
+        {
+            let mut send_locked = send_clone.lock().await;
+            if let Err(e) = send_locked.write_all(&len).await {
+                eprintln!("Failed to send length: {}", e);
+                break;
+            }
+            if let Err(e) = send_locked.write_all(&encoded).await {
+                eprintln!("Failed to send TcpOpen: {}", e);
+                break;
+            }
+        }
+
+        // Create channel for receiving data from server
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+        tcp_connections.lock().await.insert(stream_id, tx);
+
+        let send_for_task = Arc::clone(&send_clone);
+        let tcp_connections_for_task = Arc::clone(&tcp_connections);
+        let upload_bytes_task = Arc::clone(&upload_bytes);
+
+        // Spawn task to handle this TCP connection
+        tokio::spawn(async move {
+            let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+            // Task to read from local TCP and send to remote
+            let send_task = {
+                let send_for_read = Arc::clone(&send_for_task);
+                let upload_bytes_send = Arc::clone(&upload_bytes_task);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        match tcp_read.read(&mut buf).await {
+                            Ok(0) => break, // EOF
+                            Ok(n) => {
+                                // Track upload bytes
+                                upload_bytes_send.fetch_add(n as u64, Ordering::Relaxed);
+
+                                // Send data to remote
+                                let data_msg = crate::ClientMessage::TcpData {
+                                    stream_id,
+                                    data: buf[..n].to_vec(),
+                                };
+                                let config = bincode::config::standard();
+                                let encoded = match bincode::encode_to_vec(&data_msg, config) {
+                                    Ok(e) => e,
+                                    Err(_) => break,
+                                };
+                                let len = (encoded.len() as u32).to_be_bytes();
+
+                                let mut send_locked = send_for_read.lock().await;
+                                if send_locked.write_all(&len).await.is_err() {
+                                    break;
+                                }
+                                if send_locked.write_all(&encoded).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+            };
+
+            // Task to receive from remote and write to local TCP
+            let write_task = tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Wait for either task to complete
+            tokio::select! {
+                _ = send_task => {}
+                _ = write_task => {}
+            }
+
+            // Send TcpClose message
+            let close_msg = crate::ClientMessage::TcpClose { stream_id };
+            let config = bincode::config::standard();
+            if let Ok(encoded) = bincode::encode_to_vec(&close_msg, config) {
+                let len = (encoded.len() as u32).to_be_bytes();
+                let mut send_locked = send_for_task.lock().await;
+                let _ = send_locked.write_all(&len).await;
+                let _ = send_locked.write_all(&encoded).await;
+            }
+
+            // Remove from connections map
+            tcp_connections_for_task.lock().await.remove(&stream_id);
+        });
+    }
+
+    // Wait for UI to exit (when user presses 'q')
+    let _ = ui_task.await;
+
+    // Send shutdown signal
+    let _ = shutdown_tx.send(()).await;
+
+    // Cleanup
+    recv_task.abort();
 
     Ok(())
 }
