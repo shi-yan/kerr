@@ -9,6 +9,7 @@ pub mod custom_explorer;
 pub mod auth;
 pub mod connections_list;
 pub mod traffic_ui;
+pub mod debug_log;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
@@ -21,6 +22,8 @@ pub enum SessionType {
     FileBrowser,
     /// TCP relay session
     TcpRelay,
+    /// Network performance testing session
+    Ping,
 }
 
 /// Messages sent from client to server
@@ -58,6 +61,8 @@ pub enum ClientMessage {
     TcpData { stream_id: u32, data: Vec<u8> },
     /// Close a TCP connection
     TcpClose { stream_id: u32 },
+    /// Ping request with payload
+    PingRequest { data: Vec<u8> },
 }
 
 /// Messages sent from server to client
@@ -95,6 +100,8 @@ pub enum ServerMessage {
     TcpDataResponse { stream_id: u32, data: Vec<u8> },
     /// TCP connection closed or error occurred
     TcpCloseResponse { stream_id: u32, error: Option<String> },
+    /// Ping response echoing back the payload
+    PingResponse { data: Vec<u8> },
 }
 
 /// ALPN for the Kerr protocol

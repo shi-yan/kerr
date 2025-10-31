@@ -63,6 +63,11 @@ enum Commands {
         /// Remote port to forward to
         remote_port: u16,
     },
+    /// Test network performance with increasing payload sizes
+    Ping {
+        /// Connection string from the server
+        connection_string: String,
+    },
     /// Login with Google OAuth2
     Login,
     /// Logout and invalidate the current session
@@ -101,6 +106,9 @@ async fn main() -> Result<()> {
         Commands::Relay { connection_string, local_port, remote_port } => {
             kerr::client::run_tcp_relay(&connection_string, local_port, remote_port).await?;
         }
+        Commands::Ping { connection_string } => {
+            kerr::client::ping_test(connection_string).await?;
+        }
         Commands::Login => {
             kerr::auth::login().await?;
         }
@@ -129,6 +137,7 @@ async fn main() -> Result<()> {
                     println!("  Send:    kerr send {} <local> <remote>", conn_str);
                     println!("  Pull:    kerr pull {} <remote> <local>", conn_str);
                     println!("  Browse:  kerr browse {}", conn_str);
+                    println!("  Ping:    kerr ping {}", conn_str);
                     println!();
                 }
                 None => {

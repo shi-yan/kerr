@@ -11,6 +11,7 @@ use std::io::Write as IoWrite;
 use std::path::Path;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{ClientMessage, ServerMessage, ALPN};
+use crate::debug_log;
 use arboard::Clipboard;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
@@ -90,6 +91,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let pull_command = format!("kerr pull {}", connection_string);
     let browse_command = format!("kerr browse {}", connection_string);
     let relay_command = format!("kerr relay {}", connection_string);
+    let ping_command = format!("kerr ping {}", connection_string);
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Kerr Server Online                        ║");
@@ -102,6 +104,9 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     println!("  Relay:   {} <local_port> <remote_port>", relay_command);
     println!("\n─────────────────────────────────────────────────────────────────");
     println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | Ctrl+C");
+    println!("  Ping:    {}", ping_command);
+    println!("\n─────────────────────────────────────────────────────────────────");
+    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | p[i]ng | Ctrl+C");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
@@ -113,6 +118,7 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
     let pull_clone = pull_command.clone();
     let browse_clone = browse_command.clone();
     let relay_clone = relay_command.clone();
+    let ping_clone = ping_command.clone();
 
     let keyboard_task = tokio::task::spawn(async move {
         let mut event_stream = EventStream::new();
@@ -188,6 +194,22 @@ pub async fn run_server(register_alias: Option<String>) -> Result<()> {
                                     Ok(mut clipboard) => {
                                         if clipboard.set_text(&relay_clone).is_ok() {
                                             println!("\r\n✓ Relay command copied to clipboard!\r\n");
+                                        }
+                                        else {
+                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                    }
+                                }
+                            }
+                            // Handle 'i' key press to copy ping command
+                            (KeyCode::Char('i'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                match Clipboard::new() {
+                                    Ok(mut clipboard) => {
+                                        if clipboard.set_text(&ping_clone).is_ok() {
+                                            println!("\r\n✓ Ping command copied to clipboard!\r\n");
                                         } else {
                                             eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
                                         }
@@ -288,6 +310,8 @@ impl ProtocolHandler for KerrServer {
         match session_type {
             crate::SessionType::Shell => {
                 println!("\r\nStarting shell session for {node_id}\r");
+                let session_id = node_id.to_string();
+                debug_log::log_session_start(&session_id[..8]);
                 Self::handle_shell_session(node_id, send, recv).await
             }
             crate::SessionType::FileTransfer => {
@@ -302,6 +326,10 @@ impl ProtocolHandler for KerrServer {
                 println!("\r\nStarting TCP relay session for {node_id}\r");
                 Self::handle_tcp_relay_session(node_id, send, recv).await
             }
+            crate::SessionType::Ping => {
+                println!("\r\nStarting ping test session for {node_id}\r");
+                Self::handle_ping_session(node_id, send, recv).await
+            }
         }
     }
 }
@@ -312,6 +340,10 @@ impl KerrServer {
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<(), AcceptError> {
+        // Create short session ID for logging (first 8 chars of node_id)
+        let session_id = node_id.to_string();
+        let session_id = &session_id[..8];
+
         // Create a PTY system
         let pty_system = native_pty_system();
 
@@ -362,25 +394,45 @@ impl KerrServer {
         let (pty_ended_tx, mut pty_ended_rx) = tokio::sync::mpsc::channel::<()>(1);
 
         // Spawn task to write messages to send stream
+        let session_id_send = session_id.to_string();
         let send_task = tokio::spawn(async move {
+            debug_log::log_send_task_started(&session_id_send);
+            let mut msg_count = 0;
+
             while let Some(data) = send_rx.recv().await {
-                if send.write_all(&data).await.is_err() {
-                    break;
+                msg_count += 1;
+                debug_log::log_quic_write_start(&session_id_send, data.len());
+
+                match send.write_all(&data).await {
+                    Ok(()) => {
+                        debug_log::log_quic_write_done(&session_id_send, data.len());
+                    }
+                    Err(e) => {
+                        debug_log::log_quic_write_failed(&session_id_send, data.len(), &e.to_string());
+                        break;
+                    }
                 }
             }
+
+            debug_log::log_send_task_ended(&session_id_send, &format!("channel_closed, sent {} messages", msg_count));
         });
 
         // Spawn task to read from PTY and send to client
         let send_tx_clone = send_tx.clone();
+        let session_id_pty = session_id.to_string();
         let pty_to_client = tokio::spawn(async move {
+            debug_log::log_pty_task_started(&session_id_pty);
             let mut buffer = [0u8; 8192];
             let config = bincode::config::standard();
             let mut pty_ended = false;
+            let mut total_bytes_read = 0;
+            let mut read_count = 0;
 
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
                         // EOF - bash has exited
+                        debug_log::log_pty_eof(&session_id_pty);
                         println!("\r\nBash exited, notifying client\r");
                         pty_ended = true;
 
@@ -393,11 +445,19 @@ impl KerrServer {
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
                             full_msg.extend_from_slice(&encoded);
-                            let _ = send_tx_clone.send(full_msg);
+
+                            debug_log::log_msg_queued(&session_id_pty, "Error", full_msg.len());
+                            if send_tx_clone.send(full_msg).is_err() {
+                                debug_log::log_queue_send_failed(&session_id_pty, "Error");
+                            }
                         }
                         break;
                     }
                     Ok(n) => {
+                        read_count += 1;
+                        total_bytes_read += n;
+                        debug_log::log_pty_read(&session_id_pty, n);
+
                         let msg = ServerMessage::Output {
                             data: buffer[..n].to_vec(),
                         };
@@ -408,14 +468,22 @@ impl KerrServer {
                                 full_msg.extend_from_slice(&len);
                                 full_msg.extend_from_slice(&encoded);
 
+                                debug_log::log_msg_queued(&session_id_pty, "Output", full_msg.len());
                                 if send_tx_clone.send(full_msg).is_err() {
+                                    debug_log::log_queue_send_failed(&session_id_pty, "Output");
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                debug_log::log_pty_error(&session_id_pty, &format!("encode failed: {}", e));
+                                break;
+                            }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        debug_log::log_pty_error(&session_id_pty, &e.to_string());
+                        break;
+                    }
                 }
             }
 
@@ -423,6 +491,8 @@ impl KerrServer {
             if pty_ended {
                 let _ = pty_ended_tx.send(()).await;
             }
+
+            debug_log::log_pty_task_ended(&session_id_pty, &format!("total_reads={}, total_bytes={}", read_count, total_bytes_read));
         });
 
         // Main loop: receive from client and write to PTY, or exit if PTY ends
@@ -464,6 +534,7 @@ impl KerrServer {
 
                             match msg {
                                 ClientMessage::KeyEvent { data } => {
+                                    debug_log::log_client_input(session_id, "KeyEvent", data.len());
                                     // Write key event to PTY
                                     if let Err(e) = writer.write_all(&data) {
                                         eprintln!("\r\nFailed to write to PTY: {}\r", e);
@@ -475,6 +546,7 @@ impl KerrServer {
                                     }
                                 }
                                 ClientMessage::Resize { cols, rows } => {
+                                    debug_log::log_client_input(session_id, "Resize", 0);
                                     // Resize the PTY
                                     let new_size = PtySize {
                                         rows,
@@ -491,6 +563,7 @@ impl KerrServer {
                                     }
                                 }
                                 ClientMessage::Disconnect => {
+                                    debug_log::log_client_input(session_id, "Disconnect", 0);
                                     println!("\r\nClient requested disconnect\r");
                                     break;
                                 }
@@ -508,9 +581,12 @@ impl KerrServer {
             }
         }
 
-        // Clean up
-        pty_to_client.abort();
-        send_task.abort();
+        // Clean up - ensure all queued messages are sent before closing
+        pty_to_client.abort(); // PTY task should already be done, but ensure it's aborted
+        drop(send_tx); // Close the send channel so send_task knows to finish
+        let _ = send_task.await; // Wait for send_task to finish sending all queued messages
+
+        debug_log::log_session_end(session_id);
         println!("\r\nConnection closed for {node_id}\r");
 
         Ok(())
@@ -715,7 +791,134 @@ impl KerrServer {
                 }
                 crate::ClientMessage::RequestDownload { path } => {
                     println!("\r\nClient requested download: {}\r", path);
-                    // TODO: Implement file download
+
+                    // Check if path exists
+                    let file_path = Path::new(&path);
+                    if !file_path.exists() {
+                        let err_msg = crate::ServerMessage::Error {
+                            message: format!("Path does not exist: {}", path),
+                        };
+                        eprintln!("\r\nError: Path does not exist: {}\r", path);
+                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            let len = (encoded.len() as u32).to_be_bytes();
+                            let mut full_msg = Vec::new();
+                            full_msg.extend_from_slice(&len);
+                            full_msg.extend_from_slice(&encoded);
+                            let _ = send_tx.send(full_msg);
+                        }
+                        continue;
+                    }
+
+                    let is_dir = file_path.is_dir();
+
+                    // Calculate total size
+                    let total_size = match crate::transfer::calculate_size(file_path) {
+                        Ok(size) => size,
+                        Err(e) => {
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to calculate size: {}", e),
+                            };
+                            eprintln!("\r\nError calculating size: {}\r", e);
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            continue;
+                        }
+                    };
+
+                    println!("\r\nSending file: {} ({} bytes, is_dir: {})\r", path, total_size, is_dir);
+
+                    // Send StartDownload message
+                    let start_msg = crate::ServerMessage::StartDownload {
+                        size: total_size,
+                        is_dir,
+                    };
+                    if let Ok(encoded) = bincode::encode_to_vec(&start_msg, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        let mut full_msg = Vec::new();
+                        full_msg.extend_from_slice(&len);
+                        full_msg.extend_from_slice(&encoded);
+                        let _ = send_tx.send(full_msg);
+                    }
+
+                    // Get all files to send
+                    let files = match crate::transfer::get_files_recursive(file_path) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            let err_msg = crate::ServerMessage::Error {
+                                message: format!("Failed to read files: {}", e),
+                            };
+                            eprintln!("\r\nError reading files: {}\r", e);
+                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Send file chunks
+                    use std::io::Read;
+                    let mut bytes_sent = 0u64;
+
+                    for file in files {
+                        let mut f = match std::fs::File::open(&file) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                eprintln!("\r\nFailed to open file {:?}: {}\r", file, e);
+                                continue;
+                            }
+                        };
+
+                        let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
+
+                        loop {
+                            let n = match f.read(&mut buffer) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    eprintln!("\r\nFailed to read file {:?}: {}\r", file, e);
+                                    break;
+                                }
+                            };
+
+                            if n == 0 {
+                                break;
+                            }
+
+                            let chunk_msg = crate::ServerMessage::FileChunk {
+                                data: buffer[..n].to_vec(),
+                            };
+
+                            if let Ok(encoded) = bincode::encode_to_vec(&chunk_msg, config) {
+                                let len = (encoded.len() as u32).to_be_bytes();
+                                let mut full_msg = Vec::new();
+                                full_msg.extend_from_slice(&len);
+                                full_msg.extend_from_slice(&encoded);
+                                let _ = send_tx.send(full_msg);
+                            }
+
+                            bytes_sent += n as u64;
+                        }
+                    }
+
+                    // Send EndDownload message
+                    let end_msg = crate::ServerMessage::EndDownload;
+                    if let Ok(encoded) = bincode::encode_to_vec(&end_msg, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        let mut full_msg = Vec::new();
+                        full_msg.extend_from_slice(&len);
+                        full_msg.extend_from_slice(&encoded);
+                        let _ = send_tx.send(full_msg);
+                    }
+
+                    println!("\r\nDownload completed: {} ({} bytes sent)\r", path, bytes_sent);
                 }
                 crate::ClientMessage::Disconnect => {
                     println!("\r\nClient requested disconnect\r");
@@ -970,6 +1173,7 @@ impl KerrServer {
         let config = bincode::config::standard();
 
         // Main loop to handle client messages
+
         loop {
             // Read message length
             let mut len_bytes = [0u8; 4];
@@ -980,6 +1184,7 @@ impl KerrServer {
 
             // Read message
             let mut msg_bytes = vec![0u8; msg_len];
+
             if recv.read_exact(&mut msg_bytes).await.is_err() {
                 break;
             }
@@ -1152,6 +1357,67 @@ impl KerrServer {
         }
 
         println!("\r\nTCP relay session closed for {node_id}\r");
+        Ok(())
+    }
+
+    async fn handle_ping_session(
+        node_id: iroh::PublicKey,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<(), AcceptError> {
+        let config = bincode::config::standard();
+
+        println!("\r\nPing session started for {node_id}\r");
+
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message data
+            let mut msg_bytes = vec![0u8; len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                break;
+            }
+
+            // Deserialize message
+            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok((m, _)) => m,
+                Err(e) => {
+                    eprintln!("\r\nFailed to deserialize message: {}\r", e);
+                    continue;
+                }
+            };
+
+            match msg {
+                crate::ClientMessage::PingRequest { data } => {
+                    // Echo the data back
+                    let response = crate::ServerMessage::PingResponse { data };
+
+                    if let Ok(encoded) = bincode::encode_to_vec(&response, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        if send.write_all(&len).await.is_err() {
+                            break;
+                        }
+                        if send.write_all(&encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                crate::ClientMessage::Disconnect => {
+                    println!("\r\nClient requested disconnect\r");
+                    break;
+                }
+                _ => {
+                    eprintln!("\r\nUnexpected message type in ping session\r");
+                }
+            }
+        }
+
+        println!("\r\nPing session closed for {node_id}\r");
         Ok(())
     }
 }
