@@ -1,18 +1,24 @@
 use anyhow::Result;
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    response::{Html, IntoResponse, Json},
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use base64::Engine;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::custom_explorer::filesystem::{FileEntry, FileMetadata, RemoteFilesystem};
+
+#[derive(RustEmbed)]
+#[folder = "frontend/dist"]
+struct Asset;
 
 /// Shared state for the web UI
 struct AppState {
@@ -55,11 +61,11 @@ pub async fn run_web_ui(connection_string: String) -> Result<()> {
 
     // Build our application router
     let app = Router::new()
-        .route("/", get(serve_html))
         .route("/api/files", get(list_files))
         .route("/api/file/content", get(read_file))
         .route("/api/file/content", post(write_file))
         .route("/api/file/metadata", get(get_metadata))
+        .fallback(static_handler)
         .with_state(state);
 
     // Start the server
@@ -73,9 +79,43 @@ pub async fn run_web_ui(connection_string: String) -> Result<()> {
     Ok(())
 }
 
-/// Serve the main HTML page
-async fn serve_html() -> Html<&'static str> {
-    Html(include_str!("web_ui.html"))
+/// Serve static files from embedded assets
+async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+
+    // If path is empty, serve index.html
+    let path = if path.is_empty() || path == "/" {
+        "index.html"
+    } else {
+        path
+    };
+
+    match Asset::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(content.data.to_vec()))
+                .unwrap()
+        }
+        None => {
+            // For SPA routing, serve index.html for non-API routes
+            if !path.starts_with("api/") {
+                if let Some(index) = Asset::get("index.html") {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(Body::from(index.data.to_vec()))
+                        .unwrap();
+                }
+            }
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("404 Not Found"))
+                .unwrap()
+        }
+    }
 }
 
 #[derive(Deserialize)]
