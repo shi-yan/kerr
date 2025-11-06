@@ -1,31 +1,24 @@
 <template>
   <div class="app">
     <header class="header">
-      <h1 class="title">🌌 Kerr Remote File Browser</h1>
+      <h1 class="title">🌌 Kerr Remote Shell & File Browser</h1>
     </header>
 
     <div class="container">
-      <div class="browser-panel">
-        <FileBrowser @file-selected="handleFileSelected" />
+      <div class="terminal-panel">
+        <Terminal />
       </div>
 
-      <div class="editor-panel">
-        <FileEditor :file-path="selectedFilePath" />
+      <div class="browser-panel">
+        <FileBrowser />
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import Terminal from './components/Terminal.vue';
 import FileBrowser from './components/FileBrowser.vue';
-import FileEditor from './components/FileEditor.vue';
-
-const selectedFilePath = ref<string | null>(null);
-
-const handleFileSelected = (path: string) => {
-  selectedFilePath.value = path;
-};
 </script>
 
 <style>
@@ -76,15 +69,15 @@ body {
   overflow: hidden;
 }
 
-.browser-panel {
-  width: 350px;
-  border-right: 1px solid #3e3e42;
+.terminal-panel {
+  flex: 1;
   display: flex;
   flex-direction: column;
+  border-right: 1px solid #3e3e42;
 }
 
-.editor-panel {
-  flex: 1;
+.browser-panel {
+  width: 400px;
   display: flex;
   flex-direction: column;
 }

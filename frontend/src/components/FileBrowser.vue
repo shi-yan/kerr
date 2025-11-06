@@ -47,10 +47,6 @@ const props = defineProps<{
   initialPath?: string;
 }>();
 
-const emit = defineEmits<{
-  fileSelected: [path: string];
-}>();
-
 const currentPath = ref('/');
 const entries = ref<FileEntry[]>([]);
 const loading = ref(false);
@@ -109,7 +105,7 @@ const handleItemClick = (entry: FileEntry) => {
     navigateTo(entry.path);
   } else {
     selectedPath.value = entry.path;
-    emit('fileSelected', entry.path);
+    // File selected - could add download functionality here in the future
   }
 };
 

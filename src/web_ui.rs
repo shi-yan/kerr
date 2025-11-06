@@ -1,18 +1,20 @@
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ws::WebSocketUpgrade, Query, State, WebSocket},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use base64::Engine;
+use futures::{sink::SinkExt, stream::StreamExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::custom_explorer::filesystem::{FileEntry, FileMetadata, RemoteFilesystem};
 
@@ -22,6 +24,7 @@ struct Asset;
 
 /// Shared state for the web UI
 struct AppState {
+    conn: Arc<iroh::endpoint::Connection>,
     remote_fs: Arc<RemoteFilesystem>,
 }
 
@@ -57,10 +60,14 @@ pub async fn run_web_ui(connection_string: String) -> Result<()> {
     ));
 
     // Create application state
-    let state = Arc::new(AppState { remote_fs });
+    let state = Arc::new(AppState {
+        conn: Arc::new(conn),
+        remote_fs
+    });
 
     // Build our application router
     let app = Router::new()
+        .route("/ws/shell", get(websocket_handler))
         .route("/api/files", get(list_files))
         .route("/api/file/content", get(read_file))
         .route("/api/file/content", post(write_file))
@@ -115,6 +122,147 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
                 .body(Body::from("404 Not Found"))
                 .unwrap()
         }
+    }
+}
+
+/// WebSocket handler for shell sessions
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_shell_socket(socket, state))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type")]
+enum TerminalMessage {
+    #[serde(rename = "input")]
+    Input { data: String },
+    #[serde(rename = "resize")]
+    Resize { cols: u16, rows: u16 },
+}
+
+/// Handle shell WebSocket connection
+async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
+    // Open a new bidirectional stream for shell session
+    let (send, mut recv) = match state.conn.open_bi().await {
+        Ok(streams) => streams,
+        Err(e) => {
+            eprintln!("Failed to open shell stream: {}", e);
+            return;
+        }
+    };
+
+    // Send Hello message with Shell session type
+    let hello_msg = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::Shell,
+    };
+    let hello_data = match bincode::encode_to_vec(&hello_msg, bincode::config::standard()) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Failed to encode hello message: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = send.write_all(&hello_data).await {
+        eprintln!("Failed to send hello message: {}", e);
+        return;
+    }
+
+    let send = Arc::new(Mutex::new(send));
+    let recv = Arc::new(Mutex::new(recv));
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Spawn task to read from remote shell and send to WebSocket
+    let send_clone = send.clone();
+    let recv_clone = recv.clone();
+    let shell_to_ws = tokio::spawn(async move {
+        let mut recv = recv_clone.lock().await;
+        loop {
+            let mut buf = vec![0u8; 8192];
+            match recv.read(&mut buf).await {
+                Ok(Some(n)) => {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.truncate(n);
+
+                    // Try to decode as ServerMessage
+                    if let Ok((msg, _)) = bincode::decode_from_slice::<crate::ServerMessage, _>(
+                        &buf,
+                        bincode::config::standard()
+                    ) {
+                        match msg {
+                            crate::ServerMessage::Output { data } => {
+                                // Convert bytes to string for WebSocket
+                                let text = String::from_utf8_lossy(&data).to_string();
+                                if let Err(_) = ws_sender.send(axum::extract::ws::Message::Text(text)).await {
+                                    break;
+                                }
+                            }
+                            crate::ServerMessage::Error { message } => {
+                                let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
+                                if let Err(_) = ws_sender.send(axum::extract::ws::Message::Text(error_msg)).await {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Spawn task to read from WebSocket and send to remote shell
+    let ws_to_shell = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            if let axum::extract::ws::Message::Text(text) = msg {
+                // Parse terminal message
+                if let Ok(term_msg) = serde_json::from_str::<TerminalMessage>(&text) {
+                    match term_msg {
+                        TerminalMessage::Input { data } => {
+                            let client_msg = crate::ClientMessage::KeyEvent {
+                                data: data.into_bytes(),
+                            };
+                            if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
+                                let mut send = send.lock().await;
+                                if let Err(_) = send.write_all(&msg_data).await {
+                                    break;
+                                }
+                            }
+                        }
+                        TerminalMessage::Resize { cols, rows } => {
+                            let client_msg = crate::ClientMessage::Resize { cols, rows };
+                            if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
+                                let mut send = send.lock().await;
+                                if let Err(_) = send.write_all(&msg_data).await {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Send disconnect message
+        let disconnect_msg = crate::ClientMessage::Disconnect;
+        if let Ok(msg_data) = bincode::encode_to_vec(&disconnect_msg, bincode::config::standard()) {
+            let mut send = send.lock().await;
+            let _ = send.write_all(&msg_data).await;
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = shell_to_ws => {},
+        _ = ws_to_shell => {},
     }
 }
 
