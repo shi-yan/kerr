@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kerr Remote File Browser</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: #252526;
+            padding: 15px 20px;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        h1 {
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .browser-panel {
+            width: 350px;
+            background: #252526;
+            border-right: 1px solid #3e3e42;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .breadcrumb {
+            padding: 10px 15px;
+            background: #2d2d30;
+            border-bottom: 1px solid #3e3e42;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .breadcrumb-item {
+            cursor: pointer;
+            color: #4fc3f7;
+        }
+
+        .breadcrumb-item:hover {
+            text-decoration: underline;
+        }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 5px;
+        }
+
+        .file-item {
+            padding: 8px 15px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 3px;
+            font-size: 13px;
+        }
+
+        .file-item:hover {
+            background: #2a2d2e;
+        }
+
+        .file-item.selected {
+            background: #094771;
+        }
+
+        .file-icon {
+            width: 16px;
+            height: 16px;
+            display: inline-block;
+        }
+
+        .folder-icon::before {
+            content: "📁";
+        }
+
+        .file-icon::before {
+            content: "📄";
+        }
+
+        .editor-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .editor-header {
+            padding: 10px 15px;
+            background: #2d2d30;
+            border-bottom: 1px solid #3e3e42;
+            font-size: 13px;
+        }
+
+        .editor-content {
+            flex: 1;
+            position: relative;
+        }
+
+        #editor {
+            width: 100%;
+            height: 100%;
+            padding: 15px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: none;
+            outline: none;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: none;
+        }
+
+        .loading {
+            padding: 20px;
+            text-align: center;
+            color: #858585;
+        }
+
+        .error {
+            padding: 20px;
+            color: #f48771;
+            background: #5a1d1d;
+            margin: 10px;
+            border-radius: 3px;
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #858585;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1e1e1e;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #424242;
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #4e4e4e;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🌌 Kerr Remote File Browser</h1>
+    </header>
+
+    <div class="container">
+        <div class="browser-panel">
+            <div class="breadcrumb" id="breadcrumb"></div>
+            <div class="file-list" id="file-list">
+                <div class="loading">Loading files...</div>
+            </div>
+        </div>
+
+        <div class="editor-panel">
+            <div class="editor-header" id="editor-header">
+                Select a file to view or edit
+            </div>
+            <div class="editor-content">
+                <div class="empty-state">
+                    <div class="empty-state-icon">📝</div>
+                    <div>Select a file from the browser to view its contents</div>
+                </div>
+                <textarea id="editor" style="display: none;"></textarea>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPath = '/';
+        let selectedFile = null;
+
+        // Initialize
+        loadDirectory('/');
+
+        // Load directory contents
+        async function loadDirectory(path) {
+            currentPath = path;
+            updateBreadcrumb();
+
+            const fileList = document.getElementById('file-list');
+            fileList.innerHTML = '<div class="loading">Loading files...</div>';
+
+            try {
+                const response = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+
+                fileList.innerHTML = '';
+
+                // Add parent directory link if not at root
+                if (path !== '/') {
+                    const parentItem = document.createElement('div');
+                    parentItem.className = 'file-item';
+                    parentItem.innerHTML = '<span class="file-icon folder-icon"></span><span>..</span>';
+                    parentItem.onclick = () => {
+                        const parentPath = path.split('/').slice(0, -1).join('/') || '/';
+                        loadDirectory(parentPath);
+                    };
+                    fileList.appendChild(parentItem);
+                }
+
+                // Sort: directories first, then files
+                data.entries.sort((a, b) => {
+                    if (a.is_dir && !b.is_dir) return -1;
+                    if (!a.is_dir && b.is_dir) return 1;
+                    return a.name.localeCompare(b.name);
+                });
+
+                // Add entries
+                data.entries.forEach(entry => {
+                    const item = document.createElement('div');
+                    item.className = 'file-item';
+                    item.innerHTML = `
+                        <span class="file-icon ${entry.is_dir ? 'folder-icon' : ''}"></span>
+                        <span>${entry.name}</span>
+                    `;
+                    item.onclick = () => {
+                        if (entry.is_dir) {
+                            loadDirectory(entry.path);
+                        } else {
+                            selectFile(entry);
+                        }
+                    };
+                    fileList.appendChild(item);
+                });
+
+                if (data.entries.length === 0) {
+                    fileList.innerHTML = '<div class="loading">Empty directory</div>';
+                }
+            } catch (error) {
+                fileList.innerHTML = `<div class="error">Error loading directory: ${error.message}</div>`;
+            }
+        }
+
+        // Update breadcrumb navigation
+        function updateBreadcrumb() {
+            const breadcrumb = document.getElementById('breadcrumb');
+            const parts = currentPath.split('/').filter(p => p);
+
+            breadcrumb.innerHTML = '';
+
+            // Root
+            const root = document.createElement('span');
+            root.className = 'breadcrumb-item';
+            root.textContent = '/';
+            root.onclick = () => loadDirectory('/');
+            breadcrumb.appendChild(root);
+
+            // Path parts
+            let accumulatedPath = '';
+            parts.forEach((part, index) => {
+                accumulatedPath += '/' + part;
+                const pathPart = accumulatedPath;
+
+                const separator = document.createElement('span');
+                separator.textContent = '/';
+                breadcrumb.appendChild(separator);
+
+                const item = document.createElement('span');
+                item.className = 'breadcrumb-item';
+                item.textContent = part;
+                item.onclick = () => loadDirectory(pathPart);
+                breadcrumb.appendChild(item);
+            });
+        }
+
+        // Select and load file
+        async function selectFile(entry) {
+            // Update UI
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            event.target.closest('.file-item').classList.add('selected');
+
+            selectedFile = entry;
+
+            // Update header
+            document.getElementById('editor-header').textContent = entry.path;
+
+            // Show loading state
+            const editor = document.getElementById('editor');
+            const emptyState = document.querySelector('.empty-state');
+
+            editor.style.display = 'block';
+            emptyState.style.display = 'none';
+            editor.value = 'Loading...';
+            editor.disabled = true;
+
+            try {
+                const response = await fetch(`/api/file/content?path=${encodeURIComponent(entry.path)}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+
+                editor.value = data.content;
+                editor.disabled = false;
+            } catch (error) {
+                editor.value = `Error loading file: ${error.message}`;
+                editor.disabled = true;
+            }
+        }
+    </script>
+</body>
+</html>

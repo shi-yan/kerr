@@ -10,6 +10,7 @@ pub mod auth;
 pub mod connections_list;
 pub mod traffic_ui;
 pub mod debug_log;
+pub mod web_ui;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
