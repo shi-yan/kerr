@@ -76,8 +76,8 @@ enum Commands {
     Ls,
     /// Start a web-based UI for remote file browsing and editing
     Ui {
-        /// Connection string from the server
-        connection_string: String,
+        /// Optional connection string from the server (if not provided, will show connection selector)
+        connection_string: Option<String>,
     },
 }
 

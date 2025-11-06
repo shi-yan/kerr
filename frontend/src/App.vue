@@ -1,24 +1,52 @@
 <template>
   <div class="app">
-    <header class="header">
-      <h1 class="title">🌌 Kerr Remote Shell & File Browser</h1>
-    </header>
+    <ConnectionSelector v-if="!connected" @connected="handleConnected" />
 
-    <div class="container">
-      <div class="terminal-panel">
-        <Terminal />
-      </div>
+    <template v-else>
+      <header class="header">
+        <h1 class="title">🌌 Kerr Remote Shell & File Browser</h1>
+      </header>
 
-      <div class="browser-panel">
-        <FileBrowser />
+      <div class="container">
+        <div class="terminal-panel">
+          <Terminal />
+        </div>
+
+        <div class="browser-panel">
+          <FileBrowser />
+        </div>
       </div>
-    </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import ConnectionSelector from './components/ConnectionSelector.vue';
 import Terminal from './components/Terminal.vue';
 import FileBrowser from './components/FileBrowser.vue';
+
+const connected = ref(false);
+
+const checkConnectionStatus = async () => {
+  try {
+    const response = await fetch('/api/connection/status');
+    if (response.ok) {
+      const data = await response.json();
+      connected.value = data.connected;
+    }
+  } catch (e) {
+    console.error('Failed to check connection status:', e);
+  }
+};
+
+const handleConnected = () => {
+  connected.value = true;
+};
+
+onMounted(() => {
+  checkConnectionStatus();
+});
 </script>
 
 <style>

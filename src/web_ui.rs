@@ -24,20 +24,68 @@ struct Asset;
 
 /// Shared state for the web UI
 struct AppState {
-    conn: Arc<iroh::endpoint::Connection>,
-    remote_fs: Arc<RemoteFilesystem>,
+    conn: Arc<Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
+    remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
+    endpoint: Arc<iroh::endpoint::Endpoint>,
 }
 
 /// Run the web UI server
-pub async fn run_web_ui(connection_string: String) -> Result<()> {
-    println!("Connecting to remote host...");
-
-    // Decode connection string and connect
-    let addr = crate::decode_connection_string(&connection_string)?;
+pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
+    // Create endpoint for future connections
     let endpoint = iroh::endpoint::Endpoint::builder()
         .discovery_n0()
         .bind()
         .await?;
+
+    // If connection string is provided, connect immediately
+    let (conn, remote_fs) = if let Some(conn_str) = connection_string {
+        println!("Connecting to remote host...");
+        let (c, fs) = connect_to_remote(&endpoint, &conn_str).await?;
+        println!("Connected! Setting up file browser session...");
+        (Some(Arc::new(c)), Some(Arc::new(fs)))
+    } else {
+        println!("Starting UI in connection selection mode...");
+        (None, None)
+    };
+
+    // Create application state
+    let state = Arc::new(AppState {
+        conn: Arc::new(Mutex::new(conn)),
+        remote_fs: Arc::new(Mutex::new(remote_fs)),
+        endpoint: Arc::new(endpoint),
+    });
+
+    // Build our application router
+    let app = Router::new()
+        .route("/api/connection/status", get(connection_status))
+        .route("/api/connection/list", get(list_connections))
+        .route("/api/connection/connect", post(connect_to_connection))
+        .route("/ws/shell", get(websocket_handler))
+        .route("/api/files", get(list_files))
+        .route("/api/file/content", get(read_file))
+        .route("/api/file/content", post(write_file))
+        .route("/api/file/metadata", get(get_metadata))
+        .fallback(static_handler)
+        .with_state(state);
+
+    // Start the server
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Web UI server running at http://{}", addr);
+    println!("Open your browser to access the UI");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+/// Connect to a remote host
+async fn connect_to_remote(
+    endpoint: &iroh::endpoint::Endpoint,
+    connection_string: &str,
+) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
+    // Decode connection string and connect
+    let addr = crate::decode_connection_string(connection_string)?;
     let conn = endpoint.connect(addr, crate::ALPN).await?;
 
     // Open bidirectional stream for file browser session
@@ -50,40 +98,10 @@ pub async fn run_web_ui(connection_string: String) -> Result<()> {
     let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())?;
     send.write_all(&hello_data).await?;
 
-    println!("Connected! Setting up file browser session...");
-
     // Create remote filesystem
-    let remote_fs = Arc::new(RemoteFilesystem::new(
-        PathBuf::from("/"),
-        send,
-        recv,
-    ));
+    let remote_fs = RemoteFilesystem::new(PathBuf::from("/"), send, recv);
 
-    // Create application state
-    let state = Arc::new(AppState {
-        conn: Arc::new(conn),
-        remote_fs
-    });
-
-    // Build our application router
-    let app = Router::new()
-        .route("/ws/shell", get(websocket_handler))
-        .route("/api/files", get(list_files))
-        .route("/api/file/content", get(read_file))
-        .route("/api/file/content", post(write_file))
-        .route("/api/file/metadata", get(get_metadata))
-        .fallback(static_handler)
-        .with_state(state);
-
-    // Start the server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Web UI server running at http://{}", addr);
-    println!("Open your browser to access the file browser and editor");
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
+    Ok((conn, remote_fs))
 }
 
 /// Serve static files from embedded assets
@@ -125,6 +143,82 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     }
 }
 
+/// Check connection status
+async fn connection_status(State(state): State<Arc<AppState>>) -> Json<ConnectionStatusResponse> {
+    let conn = state.conn.lock().await;
+    Json(ConnectionStatusResponse {
+        connected: conn.is_some(),
+    })
+}
+
+#[derive(Serialize)]
+struct ConnectionStatusResponse {
+    connected: bool,
+}
+
+/// List registered connections
+async fn list_connections() -> Result<Json<crate::auth::ConnectionsListResponse>, (StatusCode, String)> {
+    match crate::auth::fetch_connections().await {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch connections: {}", e),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConnectRequest {
+    connection_string: String,
+}
+
+#[derive(Serialize)]
+struct ConnectResponse {
+    success: bool,
+    message: String,
+}
+
+/// Connect to a selected connection
+async fn connect_to_connection(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ConnectRequest>,
+) -> Result<Json<ConnectResponse>, (StatusCode, String)> {
+    // Check if already connected
+    {
+        let conn = state.conn.lock().await;
+        if conn.is_some() {
+            return Ok(Json(ConnectResponse {
+                success: false,
+                message: "Already connected".to_string(),
+            }));
+        }
+    }
+
+    // Try to connect
+    match connect_to_remote(&state.endpoint, &request.connection_string).await {
+        Ok((conn, remote_fs)) => {
+            // Update state
+            {
+                let mut state_conn = state.conn.lock().await;
+                *state_conn = Some(Arc::new(conn));
+            }
+            {
+                let mut state_fs = state.remote_fs.lock().await;
+                *state_fs = Some(Arc::new(remote_fs));
+            }
+
+            Ok(Json(ConnectResponse {
+                success: true,
+                message: "Connected successfully".to_string(),
+            }))
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to connect: {}", e),
+        )),
+    }
+}
+
 /// WebSocket handler for shell sessions
 async fn websocket_handler(
     ws: WebSocketUpgrade,
@@ -144,8 +238,20 @@ enum TerminalMessage {
 
 /// Handle shell WebSocket connection
 async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
+    // Get the connection
+    let conn = {
+        let conn_lock = state.conn.lock().await;
+        match conn_lock.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => {
+                eprintln!("No connection available");
+                return;
+            }
+        }
+    };
+
     // Open a new bidirectional stream for shell session
-    let (send, mut recv) = match state.conn.open_bi().await {
+    let (send, mut recv) = match conn.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
             eprintln!("Failed to open shell stream: {}", e);
@@ -290,9 +396,23 @@ async fn list_files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ListFilesResponse>, (StatusCode, String)> {
+    // Get the remote filesystem
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
     let path = PathBuf::from(&query.path);
 
-    match state.remote_fs.read_dir(&path).await {
+    match remote_fs.read_dir(&path).await {
         Ok(entries) => {
             let response_entries: Vec<FileEntryResponse> = entries
                 .into_iter()
@@ -330,9 +450,23 @@ async fn get_metadata(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<FileMetadataResponse>, (StatusCode, String)> {
+    // Get the remote filesystem
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
     let path = PathBuf::from(&query.path);
 
-    match state.remote_fs.metadata(&path).await {
+    match remote_fs.metadata(&path).await {
         Ok(metadata) => Ok(Json(FileMetadataResponse {
             path: query.path,
             is_dir: metadata.is_dir,
@@ -358,9 +492,23 @@ async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<FileContentResponse>, (StatusCode, String)> {
+    // Get the remote filesystem
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
     let path = PathBuf::from(&query.path);
 
-    match state.remote_fs.read_file(&path).await {
+    match remote_fs.read_file(&path).await {
         Ok(content) => {
             let size = content.len() as u64;
             // Try to convert to string, if it fails, return base64
