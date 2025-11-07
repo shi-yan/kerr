@@ -24,9 +24,9 @@ struct Asset;
 
 /// Shared state for the web UI
 struct AppState {
-    conn: Arc<Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
+    node_addr: Arc<Mutex<Option<iroh::NodeAddr>>>,
 }
 
 /// Run the web UI server
@@ -38,11 +38,13 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .await?;
 
     // If connection string is provided, connect immediately
-    let (conn, remote_fs) = if let Some(conn_str) = connection_string {
+    let (node_addr, remote_fs) = if let Some(conn_str) = connection_string {
         println!("Connecting to remote host...");
-        let (c, fs) = connect_to_remote(&endpoint, &conn_str).await?;
+        let addr = crate::decode_connection_string(&conn_str)
+            .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
+        let (_conn, fs) = connect_to_remote(&endpoint, &addr).await?;
         println!("Connected! Setting up file browser session...");
-        (Some(Arc::new(c)), Some(Arc::new(fs)))
+        (Some(addr), Some(Arc::new(fs)))
     } else {
         println!("Starting UI in connection selection mode...");
         (None, None)
@@ -50,9 +52,9 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
 
     // Create application state
     let state = Arc::new(AppState {
-        conn: Arc::new(Mutex::new(conn)),
         remote_fs: Arc::new(Mutex::new(remote_fs)),
         endpoint: Arc::new(endpoint),
+        node_addr: Arc::new(Mutex::new(node_addr)),
     });
 
     // Build our application router
@@ -82,12 +84,10 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
 /// Connect to a remote host
 async fn connect_to_remote(
     endpoint: &iroh::endpoint::Endpoint,
-    connection_string: &str,
+    addr: &iroh::NodeAddr,
 ) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
-    // Decode connection string and connect
-    let addr = crate::decode_connection_string(connection_string)
-        .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
-    let conn = endpoint.connect(addr, crate::ALPN).await?;
+    // Connect to the remote host
+    let conn = endpoint.connect(addr.clone(), crate::ALPN).await?;
 
     // Open bidirectional stream for file browser session
     let (mut send, recv) = conn.open_bi().await?;
@@ -146,9 +146,9 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
 
 /// Check connection status
 async fn connection_status(State(state): State<Arc<AppState>>) -> Json<ConnectionStatusResponse> {
-    let conn = state.conn.lock().await;
+    let node_addr = state.node_addr.lock().await;
     Json(ConnectionStatusResponse {
-        connected: conn.is_some(),
+        connected: node_addr.is_some(),
     })
 }
 
@@ -186,8 +186,8 @@ async fn connect_to_connection(
 ) -> Result<Json<ConnectResponse>, (StatusCode, String)> {
     // Check if already connected
     {
-        let conn = state.conn.lock().await;
-        if conn.is_some() {
+        let node_addr = state.node_addr.lock().await;
+        if node_addr.is_some() {
             return Ok(Json(ConnectResponse {
                 success: false,
                 message: "Already connected".to_string(),
@@ -195,13 +195,24 @@ async fn connect_to_connection(
         }
     }
 
+    // Decode connection string
+    let addr = match crate::decode_connection_string(&request.connection_string) {
+        Ok(addr) => addr,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid connection string: {}", e),
+            ))
+        }
+    };
+
     // Try to connect
-    match connect_to_remote(&state.endpoint, &request.connection_string).await {
-        Ok((conn, remote_fs)) => {
+    match connect_to_remote(&state.endpoint, &addr).await {
+        Ok((_conn, remote_fs)) => {
             // Update state
             {
-                let mut state_conn = state.conn.lock().await;
-                *state_conn = Some(Arc::new(conn));
+                let mut state_addr = state.node_addr.lock().await;
+                *state_addr = Some(addr);
             }
             {
                 let mut state_fs = state.remote_fs.lock().await;
@@ -239,11 +250,11 @@ enum TerminalMessage {
 
 /// Handle shell WebSocket connection
 async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
-    // Get the connection
-    let conn = {
-        let conn_lock = state.conn.lock().await;
-        match conn_lock.as_ref() {
-            Some(c) => Arc::clone(c),
+    // Get the node address
+    let addr = {
+        let addr_lock = state.node_addr.lock().await;
+        match addr_lock.as_ref() {
+            Some(a) => a.clone(),
             None => {
                 eprintln!("No connection available");
                 return;
@@ -251,7 +262,17 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    // Open a new bidirectional stream for shell session
+    // Create a NEW connection for the shell session
+    // (Each session type needs its own connection due to server architecture)
+    let conn = match state.endpoint.connect(addr, crate::ALPN).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to connect for shell session: {}", e);
+            return;
+        }
+    };
+
+    // Open bidirectional stream for shell session
     let (mut send, recv) = match conn.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
