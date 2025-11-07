@@ -341,6 +341,17 @@ watch(currentPath, () => {
   savePathToStorage();
 });
 
+// Watch for connectionString to become available and load saved path
+watch(() => props.connectionString, async (newConnectionString) => {
+  if (newConnectionString && currentPath.value === '/') {
+    // Only load saved path if we're still at root (haven't navigated yet)
+    const savedPath = loadPathFromStorage();
+    if (savedPath && savedPath !== '/') {
+      await loadDirectory(savedPath);
+    }
+  }
+}, { immediate: true });
+
 onMounted(async () => {
   // Try to load saved path for this connection
   const savedPath = loadPathFromStorage();

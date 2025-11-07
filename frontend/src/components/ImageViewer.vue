@@ -10,8 +10,8 @@
           <span class="material-symbols-outlined">close</span>
         </button>
       </div>
-      <div class="viewer-container" v-viewer="viewerOptions">
-        <img :src="imageSrc" alt="Image preview" />
+      <div ref="viewerContainer" class="viewer-container">
+        <img v-if="imageSrc" :src="imageSrc" alt="Image preview" @click="showViewer" />
       </div>
       <div v-if="loading" class="viewer-status">Loading...</div>
       <div v-if="error" class="viewer-error">{{ error }}</div>
@@ -21,6 +21,7 @@
 
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue';
+import { api as viewerApi } from 'v-viewer';
 import 'viewerjs/dist/viewer.css';
 
 const props = defineProps<{
@@ -32,38 +33,45 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
+const viewerContainer = ref<HTMLElement | null>(null);
 const imageSrc = ref('');
 const loading = ref(false);
 const error = ref<string | null>(null);
 const fileName = ref('');
 
-const viewerOptions = {
-  inline: true,
-  button: false,
-  navbar: false,
-  title: false,
-  toolbar: {
-    zoomIn: 4,
-    zoomOut: 4,
-    oneToOne: 4,
-    reset: 4,
-    prev: false,
-    play: false,
-    next: false,
-    rotateLeft: 4,
-    rotateRight: 4,
-    flipHorizontal: 4,
-    flipVertical: 4,
-  },
-  tooltip: true,
-  movable: true,
-  zoomable: true,
-  rotatable: true,
-  scalable: true,
-  transition: true,
-  fullscreen: false,
-  keyboard: true,
-  initialCoverage: 0.9,
+const showViewer = () => {
+  if (!imageSrc.value) return;
+
+  viewerApi({
+    images: [imageSrc.value],
+    options: {
+      toolbar: {
+        zoomIn: 4,
+        zoomOut: 4,
+        oneToOne: 4,
+        reset: 4,
+        prev: false,
+        play: false,
+        next: false,
+        rotateLeft: 4,
+        rotateRight: 4,
+        flipHorizontal: 4,
+        flipVertical: 4,
+      },
+      tooltip: true,
+      movable: true,
+      zoomable: true,
+      rotatable: true,
+      scalable: true,
+      transition: true,
+      fullscreen: true,
+      keyboard: true,
+      title: false,
+      navbar: false,
+      backdrop: true,
+      url: 'src',
+    },
+  });
 };
 
 const loadImage = async () => {
@@ -76,6 +84,10 @@ const loadImage = async () => {
 
     await nextTick();
     loading.value = false;
+
+    // Auto-show viewer after image loads
+    await nextTick();
+    showViewer();
   } catch (e) {
     loading.value = false;
     error.value = e instanceof Error ? e.message : 'Failed to load image';
@@ -176,6 +188,7 @@ watch(() => props.isOpen, (newValue) => {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+  cursor: pointer;
 }
 
 .viewer-status {

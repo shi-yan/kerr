@@ -16,6 +16,9 @@
             {{ connectionInfo.connectionString }}
           </span>
         </span>
+        <button class="disconnect-btn" @click="handleDisconnect" title="Disconnect and go back">
+          <span class="material-symbols-outlined">arrow_back</span>
+        </button>
       </div>
       <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
         {{ connectionStatus }}
@@ -70,6 +73,18 @@ const copyConnectionString = async () => {
     console.log('Connection string copied to clipboard');
   } catch (e) {
     console.error('Failed to copy connection string:', e);
+  }
+};
+
+const handleDisconnect = () => {
+  const confirmed = confirm('Are you sure you want to disconnect and go back to connection selector?');
+  if (confirmed) {
+    // Close websocket if open
+    if (ws) {
+      ws.close();
+    }
+    // Reload the page to go back to connection selector
+    window.location.reload();
   }
 };
 
@@ -258,6 +273,30 @@ onMounted(async () => {
 .connection-id:hover {
   background: #4e4e52;
   color: #d4d4d4;
+}
+
+.disconnect-btn {
+  padding: 4px 8px;
+  background: transparent;
+  color: #d4d4d4;
+  border: 1px solid #3e3e42;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  transition: all 0.2s;
+  margin-left: 8px;
+}
+
+.disconnect-btn:hover {
+  background: #3e3e42;
+  border-color: #4e4e52;
+}
+
+.disconnect-btn .material-symbols-outlined {
+  font-size: 16px;
 }
 
 .connection-status {
