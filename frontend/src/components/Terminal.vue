@@ -1,7 +1,17 @@
 <template>
   <div class="terminal-container">
     <div class="terminal-header">
-      <span class="terminal-title">Remote Shell</span>
+      <div class="header-left">
+        <span class="terminal-title">Remote Shell</span>
+        <span v-if="connectionInfo" class="connection-info">
+          <span v-if="connectionInfo.alias" class="connection-alias">
+            {{ connectionInfo.alias }}
+          </span>
+          <span v-if="connectionInfo.connectionString" class="connection-id">
+            {{ connectionInfo.connectionString }}
+          </span>
+        </span>
+      </div>
       <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
         {{ connectionStatus }}
       </span>
@@ -18,10 +28,31 @@ import '@xterm/xterm/css/xterm.css';
 
 const terminalRef = ref<HTMLElement | null>(null);
 const connectionStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
+const connectionInfo = ref<{
+  alias?: string;
+  connectionString?: string;
+} | null>(null);
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let ws: WebSocket | null = null;
+
+const fetchConnectionInfo = async () => {
+  try {
+    const response = await fetch('/api/connection/status');
+    if (response.ok) {
+      const data = await response.json();
+      if (data.connected && data.connection_string) {
+        connectionInfo.value = {
+          alias: data.connection_alias,
+          connectionString: data.connection_string.substring(0, 6),
+        };
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch connection info:', e);
+  }
+};
 
 const connectWebSocket = () => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -53,8 +84,11 @@ const connectWebSocket = () => {
   };
 };
 
-onMounted(() => {
+onMounted(async () => {
   if (!terminalRef.value) return;
+
+  // Fetch connection info
+  await fetchConnectionInfo();
 
   // Create terminal instance
   terminal = new Terminal({
@@ -168,10 +202,36 @@ onMounted(() => {
   align-items: center;
 }
 
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .terminal-title {
   font-size: 13px;
   color: #d4d4d4;
   font-weight: 500;
+}
+
+.connection-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.connection-alias {
+  color: #4fc3f7;
+  font-weight: 500;
+}
+
+.connection-id {
+  color: #858585;
+  font-family: 'Consolas', 'Monaco', monospace;
+  background: #3e3e42;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 
 .connection-status {

@@ -95,6 +95,7 @@ const selectConnection = async (connection: Connection) => {
       },
       body: JSON.stringify({
         connection_string: connection.connection_string,
+        alias: connection.alias,
       }),
     });
 

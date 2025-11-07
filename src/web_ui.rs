@@ -27,6 +27,8 @@ struct AppState {
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
     node_addr: Arc<Mutex<Option<iroh::NodeAddr>>>,
+    connection_string: Arc<Mutex<Option<String>>>,
+    connection_alias: Arc<Mutex<Option<String>>>,
 }
 
 /// Run the web UI server
@@ -38,16 +40,16 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .await?;
 
     // If connection string is provided, connect immediately
-    let (node_addr, remote_fs) = if let Some(conn_str) = connection_string {
+    let (node_addr, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
         println!("Connecting to remote host...");
         let addr = crate::decode_connection_string(&conn_str)
             .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
         let (_conn, fs) = connect_to_remote(&endpoint, &addr).await?;
         println!("Connected! Setting up file browser session...");
-        (Some(addr), Some(Arc::new(fs)))
+        (Some(addr), Some(Arc::new(fs)), Some(conn_str), None)
     } else {
         println!("Starting UI in connection selection mode...");
-        (None, None)
+        (None, None, None, None)
     };
 
     // Create application state
@@ -55,6 +57,8 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         remote_fs: Arc::new(Mutex::new(remote_fs)),
         endpoint: Arc::new(endpoint),
         node_addr: Arc::new(Mutex::new(node_addr)),
+        connection_string: Arc::new(Mutex::new(conn_str_stored)),
+        connection_alias: Arc::new(Mutex::new(conn_alias)),
     });
 
     // Build our application router
@@ -162,14 +166,21 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
 /// Check connection status
 async fn connection_status(State(state): State<Arc<AppState>>) -> Json<ConnectionStatusResponse> {
     let node_addr = state.node_addr.lock().await;
+    let conn_str = state.connection_string.lock().await;
+    let conn_alias = state.connection_alias.lock().await;
+
     Json(ConnectionStatusResponse {
         connected: node_addr.is_some(),
+        connection_string: conn_str.clone(),
+        connection_alias: conn_alias.clone(),
     })
 }
 
 #[derive(Serialize)]
 struct ConnectionStatusResponse {
     connected: bool,
+    connection_string: Option<String>,
+    connection_alias: Option<String>,
 }
 
 /// List registered connections
@@ -186,6 +197,7 @@ async fn list_connections() -> Result<Json<crate::auth::ConnectionsListResponse>
 #[derive(Deserialize)]
 struct ConnectRequest {
     connection_string: String,
+    alias: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -232,6 +244,14 @@ async fn connect_to_connection(
             {
                 let mut state_fs = state.remote_fs.lock().await;
                 *state_fs = Some(Arc::new(remote_fs));
+            }
+            {
+                let mut conn_str = state.connection_string.lock().await;
+                *conn_str = Some(request.connection_string.clone());
+            }
+            {
+                let mut conn_alias = state.connection_alias.lock().await;
+                *conn_alias = request.alias.clone();
             }
 
             Ok(Json(ConnectResponse {
