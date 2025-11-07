@@ -102,6 +102,10 @@ async fn connect_to_remote(
         session_type: crate::SessionType::FileBrowser,
     };
     let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())?;
+
+    // Send length prefix (4 bytes) then the message
+    let len = (hello_data.len() as u32).to_be_bytes();
+    send.write_all(&len).await?;
     send.write_all(&hello_data).await?;
     eprintln!("[CONNECT] Hello message sent!");
 
@@ -301,6 +305,12 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
+    // Send length prefix (4 bytes) then the message
+    let len = (hello_data.len() as u32).to_be_bytes();
+    if let Err(e) = send.write_all(&len).await {
+        eprintln!("Failed to send hello message length: {}", e);
+        return;
+    }
     if let Err(e) = send.write_all(&hello_data).await {
         eprintln!("Failed to send hello message: {}", e);
         return;

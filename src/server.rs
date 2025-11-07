@@ -275,16 +275,20 @@ impl ProtocolHandler for KerrServer {
         println!("\r\nAccepted connection from {node_id}\r");
 
         // Accept a bi-directional stream
+        eprintln!("\r\n[SERVER] Calling accept_bi...\r");
         let (send, mut recv) = connection.accept_bi().await?;
+        eprintln!("\r\n[SERVER] accept_bi successful!\r");
 
         // Read the Hello message to determine session type
         let config = bincode::config::standard();
+        eprintln!("\r\n[SERVER] Reading Hello message length...\r");
         let mut len_bytes = [0u8; 4];
         if recv.read_exact(&mut len_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message length\r");
             return Ok(());
         }
         let len = u32::from_be_bytes(len_bytes) as usize;
+        eprintln!("\r\n[SERVER] Hello message length: {} bytes\r", len);
         let mut msg_bytes = vec![0u8; len];
         if recv.read_exact(&mut msg_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message\r");
