@@ -11,7 +11,7 @@
         <div class="divider" @mousedown="startResize"></div>
 
         <div class="browser-panel">
-          <FileBrowser />
+          <FileBrowser :connectionString="connectionString" />
         </div>
       </div>
     </template>
@@ -25,6 +25,7 @@ import Terminal from './components/Terminal.vue';
 import FileBrowser from './components/FileBrowser.vue';
 
 const connected = ref(false);
+const connectionString = ref<string>('');
 const terminalWidth = ref(800); // Default width
 const isResizing = ref(false);
 
@@ -34,14 +35,19 @@ const checkConnectionStatus = async () => {
     if (response.ok) {
       const data = await response.json();
       connected.value = data.connected;
+      if (data.connection_string) {
+        connectionString.value = data.connection_string;
+      }
     }
   } catch (e) {
     console.error('Failed to check connection status:', e);
   }
 };
 
-const handleConnected = () => {
+const handleConnected = async () => {
   connected.value = true;
+  // Fetch connection string after connecting
+  await checkConnectionStatus();
 };
 
 const startResize = (e: MouseEvent) => {

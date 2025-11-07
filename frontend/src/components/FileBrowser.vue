@@ -1,5 +1,8 @@
 <template>
   <div class="file-browser">
+    <FileEditor :filePath="editorFilePath" :isOpen="isEditorOpen" @close="closeEditor" @saved="handleFileSaved" />
+    <ImageViewer :filePath="imageFilePath" :isOpen="isImageViewerOpen" @close="closeImageViewer" />
+
     <div class="breadcrumb">
       <div class="breadcrumb-path">
         <span class="breadcrumb-item" @click="navigateTo('/')">
@@ -56,6 +59,7 @@
         class="file-item"
         :class="{ selected: selectedPath === entry.path }"
         @click="handleItemClick(entry)"
+        @dblclick="handleItemDoubleClick(entry)"
       >
         <span class="material-symbols-outlined icon">{{ entry.is_dir ? 'folder' : 'description' }}</span>
         <span class="name">{{ entry.name }}</span>
@@ -76,12 +80,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { apiClient } from '../api/client';
 import type { FileEntry } from '../types/api';
+import FileEditor from './FileEditor.vue';
+import ImageViewer from './ImageViewer.vue';
 
 const props = defineProps<{
   initialPath?: string;
+  connectionString?: string;
 }>();
 
 const currentPath = ref('/');
@@ -91,6 +98,12 @@ const error = ref<string | null>(null);
 const selectedPath = ref<string | null>(null);
 const isDraggingOver = ref(false);
 const uploadingFiles = ref<Set<string>>(new Set());
+
+// File editor and image viewer state
+const isEditorOpen = ref(false);
+const editorFilePath = ref('');
+const isImageViewerOpen = ref(false);
+const imageFilePath = ref('');
 
 const pathParts = computed(() => {
   return currentPath.value
@@ -245,8 +258,94 @@ const uploadFile = async (file: File) => {
   }
 };
 
-onMounted(() => {
-  loadDirectory(props.initialPath || '/');
+// File type detection
+const isTextFile = (filename: string): boolean => {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  const textExts = ['txt', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'scss', 'less',
+    'json', 'xml', 'md', 'markdown', 'py', 'rb', 'java', 'c', 'cpp', 'h', 'hpp',
+    'rs', 'go', 'php', 'sh', 'bash', 'yml', 'yaml', 'toml', 'ini', 'conf', 'log'];
+  return ext ? textExts.includes(ext) : false;
+};
+
+const isImageFile = (filename: string): boolean => {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
+  return ext ? imageExts.includes(ext) : false;
+};
+
+// Handle double-click to open files
+const handleItemDoubleClick = (entry: FileEntry) => {
+  if (entry.is_dir) {
+    // Navigate into directory
+    navigateTo(entry.path);
+  } else {
+    // Open file based on type
+    if (isTextFile(entry.name)) {
+      editorFilePath.value = entry.path;
+      isEditorOpen.value = true;
+    } else if (isImageFile(entry.name)) {
+      imageFilePath.value = entry.path;
+      isImageViewerOpen.value = true;
+    }
+  }
+};
+
+const closeEditor = () => {
+  isEditorOpen.value = false;
+  editorFilePath.value = '';
+};
+
+const closeImageViewer = () => {
+  isImageViewerOpen.value = false;
+  imageFilePath.value = '';
+};
+
+const handleFileSaved = () => {
+  // Reload directory to reflect any changes
+  loadDirectory(currentPath.value);
+};
+
+// LocalStorage path persistence
+const STORAGE_KEY = 'kerr_file_browser_paths';
+
+const savePathToStorage = () => {
+  if (!props.connectionString) return;
+
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    const paths = stored ? JSON.parse(stored) : {};
+    paths[props.connectionString] = currentPath.value;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(paths));
+  } catch (e) {
+    console.error('Failed to save path to localStorage:', e);
+  }
+};
+
+const loadPathFromStorage = (): string | null => {
+  if (!props.connectionString) return null;
+
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const paths = JSON.parse(stored);
+      return paths[props.connectionString] || null;
+    }
+  } catch (e) {
+    console.error('Failed to load path from localStorage:', e);
+  }
+  return null;
+};
+
+// Watch for path changes to save to localStorage
+watch(currentPath, () => {
+  savePathToStorage();
+});
+
+onMounted(async () => {
+  // Try to load saved path for this connection
+  const savedPath = loadPathFromStorage();
+  const initialPath = savedPath || props.initialPath || '/';
+  await loadDirectory(initialPath);
 });
 </script>
 
