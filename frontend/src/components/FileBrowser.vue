@@ -10,6 +10,25 @@
       </template>
     </div>
 
+    <div class="toolbar">
+      <button
+        class="btn"
+        :disabled="!selectedPath"
+        @click="handleDownload"
+        title="Download selected file"
+      >
+        ⬇ Download
+      </button>
+      <button
+        class="btn btn-danger"
+        :disabled="!selectedPath"
+        @click="handleDelete"
+        title="Delete selected file/folder"
+      >
+        🗑 Delete
+      </button>
+    </div>
+
     <div class="file-list" v-if="!loading && !error">
       <div
         v-if="currentPath !== '/'"
@@ -105,7 +124,39 @@ const handleItemClick = (entry: FileEntry) => {
     navigateTo(entry.path);
   } else {
     selectedPath.value = entry.path;
-    // File selected - could add download functionality here in the future
+  }
+};
+
+const handleDownload = async () => {
+  if (!selectedPath.value) return;
+
+  try {
+    // Create a temporary anchor element to trigger download
+    const url = `/api/files/download?path=${encodeURIComponent(selectedPath.value)}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = selectedPath.value.split('/').pop() || 'download';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to download file';
+  }
+};
+
+const handleDelete = async () => {
+  if (!selectedPath.value) return;
+
+  const confirmed = confirm(`Are you sure you want to delete:\n${selectedPath.value}`);
+  if (!confirmed) return;
+
+  try {
+    await apiClient.deleteFile(selectedPath.value);
+    selectedPath.value = null;
+    // Reload current directory
+    await loadDirectory(currentPath.value);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to delete file';
   }
 };
 
@@ -153,6 +204,46 @@ onMounted(() => {
 
 .separator {
   color: #858585;
+}
+
+.toolbar {
+  padding: 8px 15px;
+  background: #2d2d30;
+  border-bottom: 1px solid #3e3e42;
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  padding: 6px 12px;
+  background: #0e639c;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.2s;
+}
+
+.btn:hover:not(:disabled) {
+  background: #1177bb;
+}
+
+.btn:disabled {
+  background: #3e3e42;
+  color: #858585;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  background: #c72e0f;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #e81123;
 }
 
 .file-list {

@@ -46,6 +46,16 @@ export class ApiClient {
     }
     return response.json();
   }
+
+  async deleteFile(path: string): Promise<{ success: boolean }> {
+    const response = await fetch(`${API_BASE}/file/delete?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to delete file: ${response.statusText}`);
+    }
+    return response.json();
+  }
 }
 
 export const apiClient = new ApiClient();

@@ -4,7 +4,7 @@ use axum::{
     extract::{ws::{WebSocket, WebSocketUpgrade, Message}, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use base64::Engine;
@@ -64,9 +64,11 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .route("/api/connection/connect", post(connect_to_connection))
         .route("/ws/shell", get(websocket_handler))
         .route("/api/files", get(list_files))
+        .route("/api/files/download", get(download_file))
         .route("/api/file/content", get(read_file))
         .route("/api/file/content", post(write_file))
         .route("/api/file/metadata", get(get_metadata))
+        .route("/api/file/delete", delete(delete_file))
         .fallback(static_handler)
         .with_state(state);
 
@@ -648,5 +650,78 @@ async fn write_file(
     Err((
         StatusCode::NOT_IMPLEMENTED,
         "File writing not yet implemented".to_string(),
+    ))
+}
+
+/// Download a file
+async fn download_file(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FilePathQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    // Get the remote filesystem
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
+    let path = PathBuf::from(&query.path);
+
+    // Read the file content
+    match remote_fs.read_file(&path).await {
+        Ok(content) => {
+            // Extract filename from path
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download");
+
+            // Determine MIME type
+            let mime_type = mime_guess::from_path(&path)
+                .first_or_octet_stream()
+                .to_string();
+
+            // Build response with appropriate headers
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime_type)
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename),
+                )
+                .body(Body::from(content))
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to build response: {}", e),
+                    )
+                })?;
+
+            Ok(response)
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read file: {}", e),
+        )),
+    }
+}
+
+/// Delete a file or directory
+async fn delete_file(
+    State(_state): State<Arc<AppState>>,
+    Query(_query): Query<FilePathQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Note: This would require adding delete support to the RemoteFilesystem
+    // and the corresponding server-side handling. For now, return not implemented.
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "File deletion not yet implemented".to_string(),
     ))
 }

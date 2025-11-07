@@ -3,10 +3,6 @@
     <ConnectionSelector v-if="!connected" @connected="handleConnected" />
 
     <template v-else>
-      <header class="header">
-        <h1 class="title">🌌 Kerr Remote Shell & File Browser</h1>
-      </header>
-
       <div class="container">
         <div class="terminal-panel">
           <Terminal />
@@ -77,18 +73,6 @@ body {
   flex-direction: column;
   height: 100vh;
   width: 100vw;
-}
-
-.header {
-  background: #252526;
-  padding: 15px 20px;
-  border-bottom: 1px solid #3e3e42;
-}
-
-.title {
-  font-size: 18px;
-  font-weight: 500;
-  color: #d4d4d4;
 }
 
 .container {
