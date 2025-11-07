@@ -38,7 +38,8 @@ const checkConnectionStatus = async () => {
       connected.value = data.connected;
       if (data.connection_string) {
         connectionString.value = data.connection_string;
-        console.log('[App] Set connectionString to:', data.connection_string.substring(0, 20) + '...');
+        console.log('[App] FULL connectionString set to:');
+        console.log(data.connection_string);
       } else {
         console.log('[App] No connection_string in response');
       }

@@ -319,11 +319,10 @@ const savePathToStorage = () => {
     const paths = stored ? JSON.parse(stored) : {};
     paths[props.connectionString] = currentPath.value;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(paths));
-    console.log('[FileBrowser] Saved path to localStorage:', {
-      connectionString: props.connectionString.substring(0, 20) + '...',
-      path: currentPath.value,
-      allKeys: Object.keys(paths)
-    });
+    console.log('[FileBrowser] Saved path to localStorage:');
+    console.log('  ConnectionString:', props.connectionString);
+    console.log('  Path:', currentPath.value);
+    console.log('  Total keys in storage:', Object.keys(paths).length);
   } catch (e) {
     console.error('[FileBrowser] Failed to save path to localStorage:', e);
   }
@@ -338,18 +337,28 @@ const loadPathFromStorage = (): string | null => {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     console.log('[FileBrowser] loadPathFromStorage called:', {
-      connectionString: props.connectionString.substring(0, 20) + '...',
+      connectionStringLength: props.connectionString.length,
       hasStoredData: !!stored
     });
 
     if (stored) {
       const paths = JSON.parse(stored);
-      console.log('[FileBrowser] localStorage contains:', {
-        allKeys: Object.keys(paths),
-        lookingFor: props.connectionString.substring(0, 20) + '...',
-        found: paths[props.connectionString]
+      const storedKeys = Object.keys(paths);
+
+      console.log('[FileBrowser] FULL connectionString looking for:');
+      console.log(props.connectionString);
+
+      console.log('[FileBrowser] Stored keys (' + storedKeys.length + '):');
+      storedKeys.forEach((key, idx) => {
+        console.log(`Key ${idx}:`, key);
+        console.log(`  Match: ${key === props.connectionString}`);
+        console.log(`  Stored path:`, paths[key]);
       });
-      return paths[props.connectionString] || null;
+
+      const found = paths[props.connectionString];
+      console.log('[FileBrowser] Lookup result:', found || 'NOT FOUND');
+
+      return found || null;
     } else {
       console.log('[FileBrowser] localStorage is empty');
     }
@@ -369,12 +378,11 @@ watch(currentPath, () => {
 
 // Watch for connectionString to become available and load saved path
 watch(() => props.connectionString, async (newConnectionString, oldConnectionString) => {
-  console.log('[FileBrowser] connectionString watcher triggered:', {
-    newConnectionString: newConnectionString ? newConnectionString.substring(0, 20) + '...' : 'null',
-    oldConnectionString: oldConnectionString ? oldConnectionString.substring(0, 20) + '...' : 'null',
-    hasLoadedInitially: hasLoadedInitially.value,
-    currentPath: currentPath.value
-  });
+  console.log('[FileBrowser] connectionString watcher triggered:');
+  console.log('  New:', newConnectionString || 'null');
+  console.log('  Old:', oldConnectionString || 'null');
+  console.log('  hasLoadedInitially:', hasLoadedInitially.value);
+  console.log('  currentPath:', currentPath.value);
 
   // Only proceed if connectionString changed from empty to non-empty (initial connection)
   if (newConnectionString && !oldConnectionString && !hasLoadedInitially.value) {
