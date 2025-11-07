@@ -34,17 +34,22 @@ const checkConnectionStatus = async () => {
     const response = await fetch('/api/connection/status');
     if (response.ok) {
       const data = await response.json();
+      console.log('[App] Connection status response:', data);
       connected.value = data.connected;
       if (data.connection_string) {
         connectionString.value = data.connection_string;
+        console.log('[App] Set connectionString to:', data.connection_string.substring(0, 20) + '...');
+      } else {
+        console.log('[App] No connection_string in response');
       }
     }
   } catch (e) {
-    console.error('Failed to check connection status:', e);
+    console.error('[App] Failed to check connection status:', e);
   }
 };
 
 const handleConnected = async () => {
+  console.log('[App] handleConnected called');
   connected.value = true;
   // Fetch connection string after connecting
   await checkConnectionStatus();

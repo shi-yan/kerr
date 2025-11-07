@@ -309,29 +309,52 @@ const handleFileSaved = () => {
 const STORAGE_KEY = 'kerr_file_browser_paths';
 
 const savePathToStorage = () => {
-  if (!props.connectionString) return;
+  if (!props.connectionString) {
+    console.log('[FileBrowser] savePathToStorage: No connectionString, skipping save');
+    return;
+  }
 
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     const paths = stored ? JSON.parse(stored) : {};
     paths[props.connectionString] = currentPath.value;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(paths));
+    console.log('[FileBrowser] Saved path to localStorage:', {
+      connectionString: props.connectionString.substring(0, 20) + '...',
+      path: currentPath.value,
+      allKeys: Object.keys(paths)
+    });
   } catch (e) {
-    console.error('Failed to save path to localStorage:', e);
+    console.error('[FileBrowser] Failed to save path to localStorage:', e);
   }
 };
 
 const loadPathFromStorage = (): string | null => {
-  if (!props.connectionString) return null;
+  if (!props.connectionString) {
+    console.log('[FileBrowser] loadPathFromStorage: No connectionString prop');
+    return null;
+  }
 
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
+    console.log('[FileBrowser] loadPathFromStorage called:', {
+      connectionString: props.connectionString.substring(0, 20) + '...',
+      hasStoredData: !!stored
+    });
+
     if (stored) {
       const paths = JSON.parse(stored);
+      console.log('[FileBrowser] localStorage contains:', {
+        allKeys: Object.keys(paths),
+        lookingFor: props.connectionString.substring(0, 20) + '...',
+        found: paths[props.connectionString]
+      });
       return paths[props.connectionString] || null;
+    } else {
+      console.log('[FileBrowser] localStorage is empty');
     }
   } catch (e) {
-    console.error('Failed to load path from localStorage:', e);
+    console.error('[FileBrowser] Failed to load path from localStorage:', e);
   }
   return null;
 };
@@ -346,28 +369,48 @@ watch(currentPath, () => {
 
 // Watch for connectionString to become available and load saved path
 watch(() => props.connectionString, async (newConnectionString, oldConnectionString) => {
+  console.log('[FileBrowser] connectionString watcher triggered:', {
+    newConnectionString: newConnectionString ? newConnectionString.substring(0, 20) + '...' : 'null',
+    oldConnectionString: oldConnectionString ? oldConnectionString.substring(0, 20) + '...' : 'null',
+    hasLoadedInitially: hasLoadedInitially.value,
+    currentPath: currentPath.value
+  });
+
   // Only proceed if connectionString changed from empty to non-empty (initial connection)
   if (newConnectionString && !oldConnectionString && !hasLoadedInitially.value) {
+    console.log('[FileBrowser] Initial connection detected, loading saved path');
     hasLoadedInitially.value = true;
 
     // Load saved path for this connection, or default to root
     const savedPath = loadPathFromStorage();
     const initialPath = savedPath || props.initialPath || '/';
 
-    console.log('Loading initial path:', initialPath, 'for connection:', newConnectionString.substring(0, 10));
+    console.log('[FileBrowser] Will load directory:', {
+      savedPath,
+      initialPath,
+      fallbackUsed: !savedPath
+    });
     await loadDirectory(initialPath);
   }
 });
 
 onMounted(async () => {
+  console.log('[FileBrowser] onMounted called:', {
+    connectionString: props.connectionString ? props.connectionString.substring(0, 20) + '...' : 'null',
+    hasLoadedInitially: hasLoadedInitially.value
+  });
+
   // If connectionString is already available (unlikely but possible), load immediately
   if (props.connectionString && !hasLoadedInitially.value) {
+    console.log('[FileBrowser] connectionString available on mount, loading saved path');
     hasLoadedInitially.value = true;
     const savedPath = loadPathFromStorage();
     const initialPath = savedPath || props.initialPath || '/';
+    console.log('[FileBrowser] onMounted will load:', initialPath);
     await loadDirectory(initialPath);
   } else if (!props.connectionString) {
     // If no connection string yet, load root as placeholder
+    console.log('[FileBrowser] No connectionString on mount, loading root as placeholder');
     await loadDirectory('/');
   }
 });
