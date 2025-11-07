@@ -1,32 +1,36 @@
 <template>
   <div class="file-browser">
     <div class="breadcrumb">
-      <span class="breadcrumb-item" @click="navigateTo('/')">📁 /</span>
-      <template v-for="(part, index) in pathParts" :key="index">
-        <span class="separator">/</span>
-        <span class="breadcrumb-item" @click="navigateTo(getPathUpTo(index))">
-          {{ part }}
+      <div class="breadcrumb-path">
+        <span class="breadcrumb-item" @click="navigateTo('/')">
+          <span class="material-symbols-outlined">home</span>
         </span>
-      </template>
-    </div>
+        <template v-for="(part, index) in pathParts" :key="index">
+          <span class="separator">/</span>
+          <span class="breadcrumb-item" @click="navigateTo(getPathUpTo(index))">
+            {{ part }}
+          </span>
+        </template>
+      </div>
 
-    <div class="toolbar">
-      <button
-        class="btn"
-        :disabled="!selectedPath"
-        @click="handleDownload"
-        title="Download selected file"
-      >
-        ⬇ Download
-      </button>
-      <button
-        class="btn btn-danger"
-        :disabled="!selectedPath"
-        @click="handleDelete"
-        title="Delete selected file/folder"
-      >
-        🗑 Delete
-      </button>
+      <div class="breadcrumb-actions">
+        <button
+          class="icon-btn"
+          :disabled="!selectedPath"
+          @click="handleDownload"
+          title="Download selected file"
+        >
+          <span class="material-symbols-outlined">download</span>
+        </button>
+        <button
+          class="icon-btn btn-danger"
+          :disabled="!selectedPath"
+          @click="handleDelete"
+          title="Delete selected file/folder"
+        >
+          <span class="material-symbols-outlined">delete</span>
+        </button>
+      </div>
     </div>
 
     <div
@@ -42,7 +46,7 @@
         class="file-item"
         @click="navigateUp"
       >
-        <span class="icon">📁</span>
+        <span class="material-symbols-outlined icon">folder</span>
         <span class="name">..</span>
       </div>
 
@@ -53,14 +57,15 @@
         :class="{ selected: selectedPath === entry.path }"
         @click="handleItemClick(entry)"
       >
-        <span class="icon">{{ entry.is_dir ? '📁' : '📄' }}</span>
+        <span class="material-symbols-outlined icon">{{ entry.is_dir ? 'folder' : 'description' }}</span>
         <span class="name">{{ entry.name }}</span>
         <span class="size" v-if="!entry.is_dir">{{ formatSize(entry.size) }}</span>
       </div>
 
       <div v-if="isDraggingOver" class="drop-overlay">
         <div class="drop-message">
-          📤 Drop files here to upload to {{ currentPath }}
+          <span class="material-symbols-outlined">upload</span>
+          Drop files here to upload to {{ currentPath }}
         </div>
       </div>
     </div>
@@ -260,62 +265,82 @@ onMounted(() => {
   font-size: 13px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+}
+
+.breadcrumb-path {
+  display: flex;
+  align-items: center;
   gap: 5px;
   flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .breadcrumb-item {
   cursor: pointer;
   color: #4fc3f7;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .breadcrumb-item:hover {
   text-decoration: underline;
 }
 
+.breadcrumb-item .material-symbols-outlined {
+  font-size: 18px;
+}
+
 .separator {
   color: #858585;
 }
 
-.toolbar {
-  padding: 8px 15px;
-  background: #2d2d30;
-  border-bottom: 1px solid #3e3e42;
+.breadcrumb-actions {
   display: flex;
-  gap: 10px;
+  gap: 5px;
+  flex-shrink: 0;
 }
 
-.btn {
-  padding: 6px 12px;
-  background: #0e639c;
-  color: white;
-  border: none;
+.icon-btn {
+  padding: 6px;
+  background: transparent;
+  color: #d4d4d4;
+  border: 1px solid #3e3e42;
   border-radius: 3px;
   cursor: pointer;
-  font-size: 12px;
   display: flex;
   align-items: center;
-  gap: 5px;
-  transition: background 0.2s;
+  justify-content: center;
+  transition: all 0.2s;
+  width: 32px;
+  height: 32px;
 }
 
-.btn:hover:not(:disabled) {
-  background: #1177bb;
+.icon-btn:hover:not(:disabled) {
+  background: #0e639c;
+  border-color: #0e639c;
+  color: white;
 }
 
-.btn:disabled {
-  background: #3e3e42;
-  color: #858585;
+.icon-btn:disabled {
+  background: transparent;
+  border-color: #2d2d30;
+  color: #3e3e42;
   cursor: not-allowed;
 }
 
-.btn-danger {
+.icon-btn.btn-danger:hover:not(:disabled) {
   background: #c72e0f;
+  border-color: #c72e0f;
+  color: white;
 }
 
-.btn-danger:hover:not(:disabled) {
-  background: #e81123;
+.icon-btn .material-symbols-outlined {
+  font-size: 20px;
 }
 
 .file-list {
@@ -352,6 +377,13 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 500;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.drop-message .material-symbols-outlined {
+  font-size: 32px;
 }
 
 .file-item {
@@ -376,6 +408,8 @@ onMounted(() => {
 .icon {
   width: 20px;
   flex-shrink: 0;
+  font-size: 18px;
+  color: #d4d4d4;
 }
 
 .name {
