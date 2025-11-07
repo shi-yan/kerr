@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::custom_explorer::file_explorer::FileMetadata;
 use crate::custom_explorer::filesystem::{Filesystem, RemoteFilesystem};
 
 #[derive(RustEmbed)]
@@ -91,7 +90,7 @@ async fn connect_to_remote(
     let conn = endpoint.connect(addr, crate::ALPN).await?;
 
     // Open bidirectional stream for file browser session
-    let (send, recv) = conn.open_bi().await?;
+    let (mut send, recv) = conn.open_bi().await?;
 
     // Send Hello message with FileBrowser session type
     let hello_msg = crate::ClientMessage::Hello {
@@ -253,7 +252,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     };
 
     // Open a new bidirectional stream for shell session
-    let (send, mut recv) = match conn.open_bi().await {
+    let (mut send, recv) = match conn.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
             eprintln!("Failed to open shell stream: {}", e);
@@ -284,7 +283,6 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Spawn task to read from remote shell and send to WebSocket
-    let send_clone = send.clone();
     let recv_clone = recv.clone();
     let shell_to_ws = tokio::spawn(async move {
         let mut recv = recv_clone.lock().await;
@@ -422,8 +420,13 @@ async fn list_files(
                     name: entry.name,
                     path: entry.path.to_string_lossy().to_string(),
                     is_dir: entry.is_dir,
-                    size: entry.size,
-                    modified: entry.modified.map(|m| m.to_string()),
+                    size: entry.metadata.as_ref().map(|m| m.size).unwrap_or(0),
+                    modified: entry.metadata.as_ref()
+                        .and_then(|m| m.modified)
+                        .map(|m| {
+                            let duration = m.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                            duration.as_secs().to_string()
+                        }),
                 })
                 .collect();
 
@@ -473,8 +476,11 @@ async fn get_metadata(
             path: query.path,
             is_dir: metadata.is_dir,
             size: metadata.size,
-            modified: metadata.modified.map(|m| m.to_string()),
-            permissions: metadata.permissions,
+            modified: metadata.modified.map(|m| {
+                let duration = m.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                duration.as_secs().to_string()
+            }),
+            permissions: None, // Permissions not available in FileMetadata
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
