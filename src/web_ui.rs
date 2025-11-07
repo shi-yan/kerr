@@ -326,82 +326,124 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let shell_to_ws = tokio::spawn(async move {
         let mut recv = recv_clone.lock().await;
         loop {
-            let mut buf = vec![0u8; 8192];
-            match recv.read(&mut buf).await {
-                Ok(Some(n)) => {
-                    if n == 0 {
-                        break;
-                    }
-                    buf.truncate(n);
-
-                    // Try to decode as ServerMessage
-                    if let Ok((msg, _)) = bincode::decode_from_slice::<crate::ServerMessage, _>(
-                        &buf,
-                        bincode::config::standard()
-                    ) {
-                        match msg {
-                            crate::ServerMessage::Output { data } => {
-                                // Convert bytes to string for WebSocket
-                                let text = String::from_utf8_lossy(&data).to_string();
-                                if let Err(_) = ws_sender.send(Message::Text(text)).await {
-                                    break;
-                                }
-                            }
-                            crate::ServerMessage::Error { message } => {
-                                let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
-                                if let Err(_) = ws_sender.send(Message::Text(error_msg)).await {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Ok(None) | Err(_) => {
+            // Read length prefix (4 bytes)
+            let mut len_bytes = [0u8; 4];
+            match recv.read_exact(&mut len_bytes).await {
+                Ok(()) => {},
+                Err(e) => {
+                    eprintln!("[WS->SHELL] Failed to read message length: {}", e);
                     break;
                 }
             }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            eprintln!("[WS->SHELL] Reading message of length: {}", len);
+
+            // Read message data
+            let mut msg_bytes = vec![0u8; len];
+            match recv.read_exact(&mut msg_bytes).await {
+                Ok(()) => {},
+                Err(e) => {
+                    eprintln!("[WS->SHELL] Failed to read message data: {}", e);
+                    break;
+                }
+            }
+
+            // Decode as ServerMessage
+            if let Ok((msg, _)) = bincode::decode_from_slice::<crate::ServerMessage, _>(
+                &msg_bytes,
+                bincode::config::standard()
+            ) {
+                eprintln!("[WS->SHELL] Decoded message successfully");
+                match msg {
+                    crate::ServerMessage::Output { data } => {
+                        // Convert bytes to string for WebSocket
+                        let text = String::from_utf8_lossy(&data).to_string();
+                        eprintln!("[WS->SHELL] Sending output to WebSocket: {} bytes", text.len());
+                        if let Err(e) = ws_sender.send(Message::Text(text)).await {
+                            eprintln!("[WS->SHELL] Failed to send to WebSocket: {}", e);
+                            break;
+                        }
+                    }
+                    crate::ServerMessage::Error { message } => {
+                        let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
+                        eprintln!("[WS->SHELL] Sending error to WebSocket: {}", message);
+                        if let Err(e) = ws_sender.send(Message::Text(error_msg)).await {
+                            eprintln!("[WS->SHELL] Failed to send error to WebSocket: {}", e);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                eprintln!("[WS->SHELL] Failed to decode message");
+            }
         }
+        eprintln!("[WS->SHELL] shell_to_ws task ended");
     });
 
     // Spawn task to read from WebSocket and send to remote shell
     let ws_to_shell = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             if let Message::Text(text) = msg {
+                eprintln!("[SHELL->WS] Received WebSocket message: {} bytes", text.len());
                 // Parse terminal message
                 if let Ok(term_msg) = serde_json::from_str::<TerminalMessage>(&text) {
                     match term_msg {
                         TerminalMessage::Input { data } => {
+                            eprintln!("[SHELL->WS] Terminal input: {} bytes", data.len());
                             let client_msg = crate::ClientMessage::KeyEvent {
                                 data: data.into_bytes(),
                             };
                             if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
+                                // Send length prefix (4 bytes) then message
+                                let len = (msg_data.len() as u32).to_be_bytes();
                                 let mut send = send.lock().await;
-                                if let Err(_) = send.write_all(&msg_data).await {
+                                if let Err(e) = send.write_all(&len).await {
+                                    eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
                                     break;
                                 }
+                                if let Err(e) = send.write_all(&msg_data).await {
+                                    eprintln!("[SHELL->WS] Failed to send message: {}", e);
+                                    break;
+                                }
+                                eprintln!("[SHELL->WS] Sent KeyEvent message");
                             }
                         }
                         TerminalMessage::Resize { cols, rows } => {
+                            eprintln!("[SHELL->WS] Terminal resize: {}x{}", cols, rows);
                             let client_msg = crate::ClientMessage::Resize { cols, rows };
                             if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
+                                // Send length prefix (4 bytes) then message
+                                let len = (msg_data.len() as u32).to_be_bytes();
                                 let mut send = send.lock().await;
-                                if let Err(_) = send.write_all(&msg_data).await {
+                                if let Err(e) = send.write_all(&len).await {
+                                    eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
                                     break;
                                 }
+                                if let Err(e) = send.write_all(&msg_data).await {
+                                    eprintln!("[SHELL->WS] Failed to send message: {}", e);
+                                    break;
+                                }
+                                eprintln!("[SHELL->WS] Sent Resize message");
                             }
                         }
                     }
+                } else {
+                    eprintln!("[SHELL->WS] Failed to parse terminal message");
                 }
             }
         }
 
         // Send disconnect message
+        eprintln!("[SHELL->WS] Sending disconnect message");
         let disconnect_msg = crate::ClientMessage::Disconnect;
         if let Ok(msg_data) = bincode::encode_to_vec(&disconnect_msg, bincode::config::standard()) {
+            let len = (msg_data.len() as u32).to_be_bytes();
             let mut send = send.lock().await;
+            let _ = send.write_all(&len).await;
             let _ = send.write_all(&msg_data).await;
         }
+        eprintln!("[SHELL->WS] ws_to_shell task ended");
     });
 
     // Wait for either task to complete
