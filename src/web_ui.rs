@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{ws::{WebSocket, WebSocketUpgrade, Message}, Query, State},
+    extract::{ws::{WebSocket, WebSocketUpgrade, Message}, Multipart, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -65,6 +65,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .route("/ws/shell", get(websocket_handler))
         .route("/api/files", get(list_files))
         .route("/api/files/download", get(download_file))
+        .route("/api/files/upload", post(upload_file))
         .route("/api/file/content", get(read_file))
         .route("/api/file/content", post(write_file))
         .route("/api/file/metadata", get(get_metadata))
@@ -711,6 +712,221 @@ async fn download_file(
             format!("Failed to read file: {}", e),
         )),
     }
+}
+
+/// Upload a file
+async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut target_path: Option<String> = None;
+
+    // Parse multipart form data
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to read multipart field: {}", e),
+        )
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "file" {
+            // Read file content
+            let data = field.bytes().await.map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to read file data: {}", e),
+                )
+            })?;
+            file_data = Some(data.to_vec());
+        } else if name == "path" {
+            // Read target path
+            let text = field.text().await.map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to read path: {}", e),
+                )
+            })?;
+            target_path = Some(text);
+        }
+    }
+
+    let file_data = file_data.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing file data".to_string(),
+        )
+    })?;
+
+    let target_path = target_path.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing target path".to_string(),
+        )
+    })?;
+
+    // Get the endpoint to create a new connection
+    let endpoint = state.endpoint.clone();
+    let node_addr = {
+        let addr_lock = state.node_addr.lock().await;
+        match addr_lock.as_ref() {
+            Some(a) => a.clone(),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
+    // Create a new connection for file transfer
+    let conn = endpoint.connect(node_addr, crate::ALPN).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to connect: {}", e),
+        )
+    })?;
+
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to open stream: {}", e),
+        )
+    })?;
+
+    // Send Hello message with FileTransfer session type
+    let hello_msg = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::FileTransfer,
+    };
+    let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode hello: {}", e),
+            )
+        })?;
+
+    // Send length prefix then message
+    let len = (hello_data.len() as u32).to_be_bytes();
+    send.write_all(&len).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send hello length: {}", e),
+        )
+    })?;
+    send.write_all(&hello_data).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send hello: {}", e),
+        )
+    })?;
+
+    // Send StartUpload message
+    let start_msg = crate::ClientMessage::StartUpload {
+        path: target_path.clone(),
+        size: file_data.len() as u64,
+        is_dir: false,
+        force: true, // Overwrite if exists
+    };
+    let start_data = bincode::encode_to_vec(&start_msg, bincode::config::standard())
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode start upload: {}", e),
+            )
+        })?;
+
+    let len = (start_data.len() as u32).to_be_bytes();
+    send.write_all(&len).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send start upload length: {}", e),
+        )
+    })?;
+    send.write_all(&start_data).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send start upload: {}", e),
+        )
+    })?;
+
+    // Wait for server response (it may ask for confirmation if file exists)
+    let mut len_bytes = [0u8; 4];
+    recv.read_exact(&mut len_bytes).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read response length: {}", e),
+        )
+    })?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+
+    let mut msg_bytes = vec![0u8; len];
+    recv.read_exact(&mut msg_bytes).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read response: {}", e),
+        )
+    })?;
+
+    // Send file data in chunks
+    const CHUNK_SIZE: usize = 65536; // 64KB chunks
+    for chunk in file_data.chunks(CHUNK_SIZE) {
+        let chunk_msg = crate::ClientMessage::FileChunk {
+            data: chunk.to_vec(),
+        };
+        let chunk_data = bincode::encode_to_vec(&chunk_msg, bincode::config::standard())
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to encode chunk: {}", e),
+                )
+            })?;
+
+        let len = (chunk_data.len() as u32).to_be_bytes();
+        send.write_all(&len).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to send chunk length: {}", e),
+            )
+        })?;
+        send.write_all(&chunk_data).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to send chunk: {}", e),
+            )
+        })?;
+    }
+
+    // Send EndUpload message
+    let end_msg = crate::ClientMessage::EndUpload;
+    let end_data = bincode::encode_to_vec(&end_msg, bincode::config::standard())
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode end upload: {}", e),
+            )
+        })?;
+
+    let len = (end_data.len() as u32).to_be_bytes();
+    send.write_all(&len).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send end upload length: {}", e),
+        )
+    })?;
+    send.write_all(&end_data).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send end upload: {}", e),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "path": target_path,
+    })))
 }
 
 /// Delete a file or directory

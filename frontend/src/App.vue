@@ -4,9 +4,11 @@
 
     <template v-else>
       <div class="container">
-        <div class="terminal-panel">
+        <div class="terminal-panel" :style="{ width: terminalWidth + 'px' }">
           <Terminal />
         </div>
+
+        <div class="divider" @mousedown="startResize"></div>
 
         <div class="browser-panel">
           <FileBrowser />
@@ -17,12 +19,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import ConnectionSelector from './components/ConnectionSelector.vue';
 import Terminal from './components/Terminal.vue';
 import FileBrowser from './components/FileBrowser.vue';
 
 const connected = ref(false);
+const terminalWidth = ref(800); // Default width
+const isResizing = ref(false);
 
 const checkConnectionStatus = async () => {
   try {
@@ -40,8 +44,40 @@ const handleConnected = () => {
   connected.value = true;
 };
 
+const startResize = (e: MouseEvent) => {
+  isResizing.value = true;
+  e.preventDefault();
+};
+
+const onMouseMove = (e: MouseEvent) => {
+  if (!isResizing.value) return;
+
+  // Set terminal width based on mouse X position
+  const minWidth = 300;
+  const maxWidth = window.innerWidth - 300; // Leave at least 300px for file browser
+  const newWidth = Math.max(minWidth, Math.min(maxWidth, e.clientX));
+  terminalWidth.value = newWidth;
+};
+
+const stopResize = () => {
+  isResizing.value = false;
+};
+
 onMounted(() => {
   checkConnectionStatus();
+
+  // Initialize terminal width to 60% of window width
+  terminalWidth.value = Math.floor(window.innerWidth * 0.6);
+
+  // Add global mouse event listeners for resize
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mouseup', stopResize);
+});
+
+onUnmounted(() => {
+  // Clean up event listeners
+  document.removeEventListener('mousemove', onMouseMove);
+  document.removeEventListener('mouseup', stopResize);
 });
 </script>
 
@@ -82,15 +118,27 @@ body {
 }
 
 .terminal-panel {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #3e3e42;
+  overflow: hidden;
+}
+
+.divider {
+  width: 4px;
+  background: #3e3e42;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.divider:hover {
+  background: #007acc;
 }
 
 .browser-panel {
-  width: 400px;
+  flex: 1;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 </style>
