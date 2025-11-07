@@ -204,22 +204,17 @@ onBeforeUnmount(() => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.8);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: #282c34;
   z-index: 1000;
 }
 
 .file-editor-modal {
-  width: 90vw;
-  height: 90vh;
+  width: 100%;
+  height: 100%;
   background: #282c34;
-  border-radius: 8px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
 }
 
 .editor-header {

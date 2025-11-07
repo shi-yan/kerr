@@ -76,7 +76,7 @@ const initializeViewer = () => {
   }
 
   viewer = new Viewer(imageRef.value, {
-    inline: false,
+    inline: true,
     viewed() {
       // Show viewer after image is loaded
     },
@@ -87,14 +87,15 @@ const initializeViewer = () => {
       zoomOut: true,
       oneToOne: true,
       reset: true,
+      prev: false,
+      play: false,
+      next: false,
       rotateLeft: true,
       rotateRight: true,
       flipHorizontal: true,
       flipVertical: true,
     },
   });
-
-  viewer.show();
 };
 
 const close = () => {
@@ -132,22 +133,17 @@ onBeforeUnmount(() => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.9);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: #1e1e1e;
   z-index: 1000;
 }
 
 .image-viewer-modal {
-  width: 90vw;
-  height: 90vh;
+  width: 100%;
+  height: 100%;
   background: #1e1e1e;
-  border-radius: 8px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
 }
 
 .viewer-header {
@@ -203,10 +199,13 @@ onBeforeUnmount(() => {
   justify-content: center;
   overflow: hidden;
   background: #252526;
+  position: relative;
 }
 
 .viewer-container img {
-  display: none;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
 
 .viewer-status {
@@ -227,21 +226,27 @@ onBeforeUnmount(() => {
 </style>
 
 <style>
-/* Override viewerjs styles for dark theme */
-.viewer-backdrop {
-  background-color: rgba(0, 0, 0, 0.9);
+/* Override viewerjs styles for dark theme and inline mode */
+.viewer-container .viewer-container {
+  background-color: #252526;
 }
 
-.viewer-container {
+.viewer-canvas {
   background-color: transparent;
 }
 
 .viewer-toolbar > ul > li {
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: rgba(45, 45, 48, 0.9);
   color: #d4d4d4;
+  border-radius: 4px;
 }
 
 .viewer-toolbar > ul > li:hover {
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: rgba(62, 62, 66, 0.9);
+}
+
+.viewer-button {
+  background-color: transparent;
+  color: #d4d4d4;
 }
 </style>
