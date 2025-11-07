@@ -86,21 +86,29 @@ async fn connect_to_remote(
     endpoint: &iroh::endpoint::Endpoint,
     addr: &iroh::NodeAddr,
 ) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
+    eprintln!("[CONNECT] Connecting to remote host...");
     // Connect to the remote host
     let conn = endpoint.connect(addr.clone(), crate::ALPN).await?;
+    eprintln!("[CONNECT] Connection established!");
 
+    eprintln!("[CONNECT] Opening bidirectional stream...");
     // Open bidirectional stream for file browser session
     let (mut send, recv) = conn.open_bi().await?;
+    eprintln!("[CONNECT] Bidirectional stream opened!");
 
     // Send Hello message with FileBrowser session type
+    eprintln!("[CONNECT] Sending Hello message with FileBrowser session type...");
     let hello_msg = crate::ClientMessage::Hello {
         session_type: crate::SessionType::FileBrowser,
     };
     let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())?;
     send.write_all(&hello_data).await?;
+    eprintln!("[CONNECT] Hello message sent!");
 
     // Create remote filesystem
+    eprintln!("[CONNECT] Creating RemoteFilesystem...");
     let remote_fs = RemoteFilesystem::new(PathBuf::from("/"), send, recv);
+    eprintln!("[CONNECT] RemoteFilesystem created successfully!");
 
     Ok((conn, remote_fs))
 }
@@ -417,12 +425,20 @@ async fn list_files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ListFilesResponse>, (StatusCode, String)> {
+    eprintln!("[API] list_files called for path: {}", query.path);
+
     // Get the remote filesystem
     let remote_fs = {
+        eprintln!("[API] Acquiring remote_fs lock...");
         let fs_lock = state.remote_fs.lock().await;
+        eprintln!("[API] Lock acquired, checking if fs exists...");
         match fs_lock.as_ref() {
-            Some(fs) => Arc::clone(fs),
+            Some(fs) => {
+                eprintln!("[API] Remote filesystem found, cloning...");
+                Arc::clone(fs)
+            },
             None => {
+                eprintln!("[API] ERROR: No remote filesystem available");
                 return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Not connected to remote host".to_string(),
@@ -432,6 +448,7 @@ async fn list_files(
     };
 
     let path = PathBuf::from(&query.path);
+    eprintln!("[API] Calling remote_fs.read_dir for: {:?}", path);
 
     match remote_fs.read_dir(&path).await {
         Ok(entries) => {
