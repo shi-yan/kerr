@@ -1,9 +1,9 @@
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{ws::WebSocketUpgrade, Query, State, WebSocket},
+    extract::{ws::{WebSocket, WebSocketUpgrade, Message}, Query, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::custom_explorer::filesystem::{FileEntry, FileMetadata, RemoteFilesystem};
+use crate::custom_explorer::file_explorer::FileMetadata;
+use crate::custom_explorer::filesystem::{Filesystem, RemoteFilesystem};
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -85,7 +86,8 @@ async fn connect_to_remote(
     connection_string: &str,
 ) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
     // Decode connection string and connect
-    let addr = crate::decode_connection_string(connection_string)?;
+    let addr = crate::decode_connection_string(connection_string)
+        .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
     let conn = endpoint.connect(addr, crate::ALPN).await?;
 
     // Open bidirectional stream for file browser session
@@ -304,13 +306,13 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                             crate::ServerMessage::Output { data } => {
                                 // Convert bytes to string for WebSocket
                                 let text = String::from_utf8_lossy(&data).to_string();
-                                if let Err(_) = ws_sender.send(axum::extract::ws::Message::Text(text)).await {
+                                if let Err(_) = ws_sender.send(Message::Text(text)).await {
                                     break;
                                 }
                             }
                             crate::ServerMessage::Error { message } => {
                                 let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
-                                if let Err(_) = ws_sender.send(axum::extract::ws::Message::Text(error_msg)).await {
+                                if let Err(_) = ws_sender.send(Message::Text(error_msg)).await {
                                     break;
                                 }
                             }
@@ -328,7 +330,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     // Spawn task to read from WebSocket and send to remote shell
     let ws_to_shell = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            if let axum::extract::ws::Message::Text(text) = msg {
+            if let Message::Text(text) = msg {
                 // Parse terminal message
                 if let Ok(term_msg) = serde_json::from_str::<TerminalMessage>(&text) {
                     match term_msg {
@@ -541,8 +543,8 @@ struct WriteFileResponse {
 
 /// Write file content (placeholder - not implemented yet in RemoteFilesystem)
 async fn write_file(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<WriteFileRequest>,
+    State(_state): State<Arc<AppState>>,
+    Json(_request): Json<WriteFileRequest>,
 ) -> Result<Json<WriteFileResponse>, (StatusCode, String)> {
     // Note: This would require adding write support to the RemoteFilesystem
     // and the corresponding server-side handling. For now, return not implemented.

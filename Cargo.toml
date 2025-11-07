@@ -37,7 +37,7 @@ directories = "5.0"
 hostname = "0.4"
 tui-widget-list = "0.13"
 lazy_static = "1.5"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
 rust-embed = "8.5"
