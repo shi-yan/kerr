@@ -7,7 +7,12 @@
           <span v-if="connectionInfo.alias" class="connection-alias">
             {{ connectionInfo.alias }}
           </span>
-          <span v-if="connectionInfo.connectionString" class="connection-id">
+          <span
+            v-if="connectionInfo.connectionString"
+            class="connection-id"
+            @click="copyConnectionString"
+            title="Click to copy full connection string"
+          >
             {{ connectionInfo.connectionString }}
           </span>
         </span>
@@ -31,6 +36,7 @@ const connectionStatus = ref<'connecting' | 'connected' | 'disconnected' | 'erro
 const connectionInfo = ref<{
   alias?: string;
   connectionString?: string;
+  fullConnectionString?: string;
 } | null>(null);
 
 let terminal: Terminal | null = null;
@@ -46,11 +52,24 @@ const fetchConnectionInfo = async () => {
         connectionInfo.value = {
           alias: data.connection_alias,
           connectionString: data.connection_string.substring(0, 6),
+          fullConnectionString: data.connection_string,
         };
       }
     }
   } catch (e) {
     console.error('Failed to fetch connection info:', e);
+  }
+};
+
+const copyConnectionString = async () => {
+  if (!connectionInfo.value?.fullConnectionString) return;
+
+  try {
+    await navigator.clipboard.writeText(connectionInfo.value.fullConnectionString);
+    // Could show a toast notification here
+    console.log('Connection string copied to clipboard');
+  } catch (e) {
+    console.error('Failed to copy connection string:', e);
   }
 };
 
@@ -232,6 +251,13 @@ onMounted(async () => {
   background: #3e3e42;
   padding: 2px 6px;
   border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.connection-id:hover {
+  background: #4e4e52;
+  color: #d4d4d4;
 }
 
 .connection-status {

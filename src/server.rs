@@ -1120,6 +1120,30 @@ impl KerrServer {
                     }
                 }
 
+                crate::ClientMessage::FsDelete { path } => {
+                    println!("\r\nFsDelete request: {}\r", path);
+
+                    let path_obj = Path::new(&path);
+                    let result = if path_obj.is_dir() {
+                        std::fs::remove_dir_all(path_obj)
+                    } else {
+                        std::fs::remove_file(path_obj)
+                    };
+
+                    match result {
+                        Ok(()) => {
+                            println!("\r\nSuccessfully deleted: {}\r", path);
+                            crate::ServerMessage::FsDeleteResponse { success: true }
+                        }
+                        Err(e) => {
+                            eprintln!("\r\nFailed to delete {}: {}\r", path, e);
+                            crate::ServerMessage::FsError {
+                                message: format!("Failed to delete: {}", e),
+                            }
+                        }
+                    }
+                }
+
                 crate::ClientMessage::Disconnect => {
                     println!("\r\nClient disconnecting\r");
                     break;

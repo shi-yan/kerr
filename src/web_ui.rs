@@ -951,13 +951,32 @@ async fn upload_file(
 
 /// Delete a file or directory
 async fn delete_file(
-    State(_state): State<Arc<AppState>>,
-    Query(_query): Query<FilePathQuery>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FilePathQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Note: This would require adding delete support to the RemoteFilesystem
-    // and the corresponding server-side handling. For now, return not implemented.
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "File deletion not yet implemented".to_string(),
-    ))
+    // Get the remote filesystem
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
+    let path = PathBuf::from(&query.path);
+
+    match remote_fs.delete_file(&path).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "success": true,
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete file: {}", e),
+        )),
+    }
 }

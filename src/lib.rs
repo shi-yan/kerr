@@ -56,6 +56,8 @@ pub enum ClientMessage {
     FsReadFile { path: String },
     /// Request file hash (for file browser caching)
     FsHashFile { path: String },
+    /// Request to delete a file or directory (for file browser)
+    FsDelete { path: String },
     /// Open a new TCP connection on the remote server
     TcpOpen { stream_id: u32, destination_port: u16 },
     /// Send TCP data to a remote connection
@@ -93,6 +95,8 @@ pub enum ServerMessage {
     FsFileContent { data: Vec<u8> },
     /// File hash response (for file browser caching) - 32 bytes blake3 hash as hex string
     FsHashResponse { hash: String },
+    /// File deletion confirmation response (for file browser)
+    FsDeleteResponse { success: bool },
     /// Filesystem error notification (for file browser UI feedback)
     FsError { message: String },
     /// TCP connection opened successfully (or failed)
