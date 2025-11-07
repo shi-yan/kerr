@@ -42,7 +42,7 @@ const connectWebSocket = () => {
     }
   };
 
-  ws.onerror = (error) => {
+  ws.onerror = () => {
     connectionStatus.value = 'error';
     terminal?.writeln('\r\n\x1b[31mWebSocket error occurred\x1b[0m\r\n');
   };
