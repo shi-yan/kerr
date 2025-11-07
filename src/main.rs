@@ -74,6 +74,11 @@ enum Commands {
     Logout,
     /// List all registered connections
     Ls,
+    /// Start a web-based UI for remote file browsing and editing
+    Ui {
+        /// Optional connection string from the server (if not provided, will show connection selector)
+        connection_string: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -138,12 +143,17 @@ async fn main() -> Result<()> {
                     println!("  Pull:    kerr pull {} <remote> <local>", conn_str);
                     println!("  Browse:  kerr browse {}", conn_str);
                     println!("  Ping:    kerr ping {}", conn_str);
+                    println!("  Web UI:  kerr ui {}", conn_str);
                     println!();
                 }
                 None => {
                     println!("No connection selected.");
                 }
             }
+        }
+        Commands::Ui { connection_string } => {
+            kerr::web_ui::run_web_ui(connection_string).await
+                .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
         }
     }
 

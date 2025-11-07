@@ -345,6 +345,39 @@ impl RemoteFilesystem {
             )),
         }
     }
+
+    /// Delete a file or directory on the remote filesystem
+    pub async fn delete_file(&self, path: &Path) -> io::Result<()> {
+        let msg = crate::ClientMessage::FsDelete {
+            path: path.display().to_string(),
+        };
+
+        match self.send_request(msg).await? {
+            crate::ServerMessage::FsDeleteResponse { success } => {
+                if success {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(io::ErrorKind::Other, "Delete failed"))
+                }
+            }
+            crate::ServerMessage::FsError { message } => {
+                // Call error callback if set
+                if let Ok(cb_guard) = self.error_callback.lock() {
+                    if let Some(cb) = cb_guard.as_ref() {
+                        cb(message.clone());
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
+            crate::ServerMessage::Error { message } => {
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Unexpected response type",
+            )),
+        }
+    }
 }
 
 /// Cache manager for remote files using content-addressed storage

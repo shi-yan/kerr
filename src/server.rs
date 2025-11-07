@@ -275,16 +275,20 @@ impl ProtocolHandler for KerrServer {
         println!("\r\nAccepted connection from {node_id}\r");
 
         // Accept a bi-directional stream
+        eprintln!("\r\n[SERVER] Calling accept_bi...\r");
         let (send, mut recv) = connection.accept_bi().await?;
+        eprintln!("\r\n[SERVER] accept_bi successful!\r");
 
         // Read the Hello message to determine session type
         let config = bincode::config::standard();
+        eprintln!("\r\n[SERVER] Reading Hello message length...\r");
         let mut len_bytes = [0u8; 4];
         if recv.read_exact(&mut len_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message length\r");
             return Ok(());
         }
         let len = u32::from_be_bytes(len_bytes) as usize;
+        eprintln!("\r\n[SERVER] Hello message length: {} bytes\r", len);
         let mut msg_bytes = vec![0u8; len];
         if recv.read_exact(&mut msg_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message\r");
@@ -1111,6 +1115,30 @@ impl KerrServer {
                         Err(e) => {
                             crate::ServerMessage::FsError {
                                 message: format!("Failed to hash file: {}", e),
+                            }
+                        }
+                    }
+                }
+
+                crate::ClientMessage::FsDelete { path } => {
+                    println!("\r\nFsDelete request: {}\r", path);
+
+                    let path_obj = Path::new(&path);
+                    let result = if path_obj.is_dir() {
+                        std::fs::remove_dir_all(path_obj)
+                    } else {
+                        std::fs::remove_file(path_obj)
+                    };
+
+                    match result {
+                        Ok(()) => {
+                            println!("\r\nSuccessfully deleted: {}\r", path);
+                            crate::ServerMessage::FsDeleteResponse { success: true }
+                        }
+                        Err(e) => {
+                            eprintln!("\r\nFailed to delete {}: {}\r", path, e);
+                            crate::ServerMessage::FsError {
+                                message: format!("Failed to delete: {}", e),
                             }
                         }
                     }

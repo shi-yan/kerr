@@ -243,6 +243,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::FsHashResponse { .. } => {
                     // File hash response - not used in run_client (only for browse)
                 }
+                ServerMessage::FsDeleteResponse { .. } => {
+                    // File deletion response - not used in run_client (only for browse)
+                }
                 ServerMessage::FsError { .. } => {
                     // Filesystem error - not used in run_client (only for browse)
                 }
