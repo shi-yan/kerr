@@ -21,6 +21,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount } from 'vue';
+// @ts-ignore - viewerjs doesn't have proper TypeScript definitions
 import Viewer from 'viewerjs';
 import 'viewerjs/dist/viewer.css';
 

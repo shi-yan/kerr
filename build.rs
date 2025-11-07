@@ -30,19 +30,17 @@ fn main() {
     println!("cargo:rerun-if-changed=frontend/tsconfig.json");
     println!("cargo:rerun-if-changed=frontend/index.html");
 
-    // Install dependencies if node_modules doesn't exist
-    let node_modules = frontend_dir.join("node_modules");
-    if !node_modules.exists() {
-        println!("cargo:warning=Installing frontend dependencies...");
-        let status = Command::new(npm_cmd)
-            .arg("install")
-            .current_dir(frontend_dir)
-            .status()
-            .expect("Failed to run npm install");
+    // Always run npm install to ensure dependencies are up to date
+    // npm install is fast if nothing changed, so this is safe
+    println!("cargo:warning=Installing frontend dependencies...");
+    let status = Command::new(npm_cmd)
+        .arg("install")
+        .current_dir(frontend_dir)
+        .status()
+        .expect("Failed to run npm install");
 
-        if !status.success() {
-            panic!("npm install failed");
-        }
+    if !status.success() {
+        panic!("npm install failed");
     }
 
     // Build the frontend

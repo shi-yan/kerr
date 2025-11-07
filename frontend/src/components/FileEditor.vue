@@ -23,7 +23,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { ref, watch, onBeforeUnmount, nextTick } from 'vue';
 import { EditorView, basicSetup } from 'codemirror';
 import { EditorState } from '@codemirror/state';
 import { javascript } from '@codemirror/lang-javascript';
@@ -33,7 +33,7 @@ import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { keymap } from '@codemirror/view';
+import { keymap, ViewUpdate } from '@codemirror/view';
 
 const props = defineProps<{
   filePath: string;
@@ -122,7 +122,7 @@ const initializeEditor = async () => {
           },
         },
       ]),
-      EditorView.updateListener.of((update) => {
+      EditorView.updateListener.of((update: ViewUpdate) => {
         if (update.docChanged) {
           isDirty.value = true;
         }
