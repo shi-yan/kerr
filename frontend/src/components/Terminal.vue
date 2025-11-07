@@ -2,6 +2,9 @@
   <div class="terminal-container">
     <div class="terminal-header">
       <div class="header-left">
+        <button class="disconnect-btn" @click="handleDisconnect" title="Disconnect and go back">
+          <span class="material-symbols-outlined">arrow_back</span>
+        </button>
         <span class="terminal-title">Remote Shell</span>
         <span v-if="connectionInfo" class="connection-info">
           <span v-if="connectionInfo.alias" class="connection-alias">
@@ -16,9 +19,6 @@
             {{ connectionInfo.connectionString }}
           </span>
         </span>
-        <button class="disconnect-btn" @click="handleDisconnect" title="Disconnect and go back">
-          <span class="material-symbols-outlined">arrow_back</span>
-        </button>
       </div>
       <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
         {{ connectionStatus }}
@@ -76,13 +76,23 @@ const copyConnectionString = async () => {
   }
 };
 
-const handleDisconnect = () => {
+const handleDisconnect = async () => {
   const confirmed = confirm('Are you sure you want to disconnect and go back to connection selector?');
   if (confirmed) {
     // Close websocket if open
     if (ws) {
       ws.close();
     }
+
+    // Call disconnect API
+    try {
+      await fetch('/api/connection/disconnect', {
+        method: 'POST',
+      });
+    } catch (e) {
+      console.error('Failed to disconnect:', e);
+    }
+
     // Reload the page to go back to connection selector
     window.location.reload();
   }
@@ -287,7 +297,7 @@ onMounted(async () => {
   gap: 4px;
   font-size: 12px;
   transition: all 0.2s;
-  margin-left: 8px;
+  margin-right: 12px;
 }
 
 .disconnect-btn:hover {

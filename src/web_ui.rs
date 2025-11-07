@@ -66,6 +66,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .route("/api/connection/status", get(connection_status))
         .route("/api/connection/list", get(list_connections))
         .route("/api/connection/connect", post(connect_to_connection))
+        .route("/api/connection/disconnect", post(disconnect_connection))
         .route("/ws/shell", get(websocket_handler))
         .route("/api/files", get(list_files))
         .route("/api/files/download", get(download_file))
@@ -264,6 +265,34 @@ async fn connect_to_connection(
             format!("Failed to connect: {}", e),
         )),
     }
+}
+
+/// Disconnect from current connection
+async fn disconnect_connection(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ConnectResponse>, (StatusCode, String)> {
+    // Clear all connection state
+    {
+        let mut state_fs = state.remote_fs.lock().await;
+        *state_fs = None;
+    }
+    {
+        let mut state_addr = state.node_addr.lock().await;
+        *state_addr = None;
+    }
+    {
+        let mut conn_str = state.connection_string.lock().await;
+        *conn_str = None;
+    }
+    {
+        let mut conn_alias = state.connection_alias.lock().await;
+        *conn_alias = None;
+    }
+
+    Ok(Json(ConnectResponse {
+        success: true,
+        message: "Disconnected successfully".to_string(),
+    }))
 }
 
 /// WebSocket handler for shell sessions

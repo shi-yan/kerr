@@ -336,27 +336,40 @@ const loadPathFromStorage = (): string | null => {
   return null;
 };
 
+// Flag to track if we've done initial load
+const hasLoadedInitially = ref(false);
+
 // Watch for path changes to save to localStorage
 watch(currentPath, () => {
   savePathToStorage();
 });
 
 // Watch for connectionString to become available and load saved path
-watch(() => props.connectionString, async (newConnectionString) => {
-  if (newConnectionString && currentPath.value === '/') {
-    // Only load saved path if we're still at root (haven't navigated yet)
+watch(() => props.connectionString, async (newConnectionString, oldConnectionString) => {
+  // Only proceed if connectionString changed from empty to non-empty (initial connection)
+  if (newConnectionString && !oldConnectionString && !hasLoadedInitially.value) {
+    hasLoadedInitially.value = true;
+
+    // Load saved path for this connection, or default to root
     const savedPath = loadPathFromStorage();
-    if (savedPath && savedPath !== '/') {
-      await loadDirectory(savedPath);
-    }
+    const initialPath = savedPath || props.initialPath || '/';
+
+    console.log('Loading initial path:', initialPath, 'for connection:', newConnectionString.substring(0, 10));
+    await loadDirectory(initialPath);
   }
-}, { immediate: true });
+});
 
 onMounted(async () => {
-  // Try to load saved path for this connection
-  const savedPath = loadPathFromStorage();
-  const initialPath = savedPath || props.initialPath || '/';
-  await loadDirectory(initialPath);
+  // If connectionString is already available (unlikely but possible), load immediately
+  if (props.connectionString && !hasLoadedInitially.value) {
+    hasLoadedInitially.value = true;
+    const savedPath = loadPathFromStorage();
+    const initialPath = savedPath || props.initialPath || '/';
+    await loadDirectory(initialPath);
+  } else if (!props.connectionString) {
+    // If no connection string yet, load root as placeholder
+    await loadDirectory('/');
+  }
 });
 </script>
 
