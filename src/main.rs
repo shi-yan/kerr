@@ -152,7 +152,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Ui { connection_string } => {
-            kerr::web_ui::run_web_ui(connection_string).await?;
+            kerr::web_ui::run_web_ui(connection_string).await
+                .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
         }
     }
 

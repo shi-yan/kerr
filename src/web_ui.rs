@@ -536,6 +536,7 @@ async fn read_file(
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct WriteFileRequest {
     path: String,
     content: String,
