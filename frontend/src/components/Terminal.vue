@@ -104,7 +104,7 @@ onMounted(() => {
     }
   });
 
-  // Handle window resize
+  // Handle terminal resize
   const handleResize = () => {
     if (fitAddon && terminal) {
       fitAddon.fit();
@@ -118,7 +118,21 @@ onMounted(() => {
     }
   };
 
+  // Listen for window resize
   window.addEventListener('resize', handleResize);
+
+  // Use ResizeObserver to detect container size changes (e.g., when divider is moved)
+  const resizeObserver = new ResizeObserver(() => {
+    // Debounce resize to avoid excessive calls
+    requestAnimationFrame(() => {
+      handleResize();
+    });
+  });
+
+  // Observe the terminal container
+  if (terminalRef.value) {
+    resizeObserver.observe(terminalRef.value);
+  }
 
   // Connect WebSocket
   connectWebSocket();
@@ -126,6 +140,7 @@ onMounted(() => {
   // Cleanup
   onBeforeUnmount(() => {
     window.removeEventListener('resize', handleResize);
+    resizeObserver.disconnect();
     if (ws) {
       ws.close();
     }
