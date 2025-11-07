@@ -1,4 +1,8 @@
 import { createApp } from 'vue'
 import App from './App.vue'
+import 'viewerjs/dist/viewer.css'
+import VueViewer from 'v-viewer'
 
-createApp(App).mount('#app')
+const app = createApp(App)
+app.use(VueViewer)
+app.mount('#app')

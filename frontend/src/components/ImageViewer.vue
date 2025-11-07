@@ -1,5 +1,5 @@
 <template>
-  <div v-if="isOpen" class="image-viewer-overlay" @click.self="close">
+  <div v-if="isOpen" class="image-viewer-overlay">
     <div class="image-viewer-modal">
       <div class="viewer-header">
         <div class="header-left">
@@ -10,8 +10,8 @@
           <span class="material-symbols-outlined">close</span>
         </button>
       </div>
-      <div class="viewer-container">
-        <img ref="imageRef" :src="imageSrc" alt="Image preview" />
+      <div class="viewer-container" v-viewer="viewerOptions">
+        <img :src="imageSrc" alt="Image preview" />
       </div>
       <div v-if="loading" class="viewer-status">Loading...</div>
       <div v-if="error" class="viewer-error">{{ error }}</div>
@@ -20,9 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount } from 'vue';
-// @ts-ignore - viewerjs doesn't have proper TypeScript definitions
-import Viewer from 'viewerjs';
+import { ref, watch, nextTick } from 'vue';
 import 'viewerjs/dist/viewer.css';
 
 const props = defineProps<{
@@ -34,13 +32,39 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
-const imageRef = ref<HTMLImageElement | null>(null);
 const imageSrc = ref('');
 const loading = ref(false);
 const error = ref<string | null>(null);
 const fileName = ref('');
 
-let viewer: Viewer | null = null;
+const viewerOptions = {
+  inline: true,
+  button: false,
+  navbar: false,
+  title: false,
+  toolbar: {
+    zoomIn: 4,
+    zoomOut: 4,
+    oneToOne: 4,
+    reset: 4,
+    prev: false,
+    play: false,
+    next: false,
+    rotateLeft: 4,
+    rotateRight: 4,
+    flipHorizontal: 4,
+    flipVertical: 4,
+  },
+  tooltip: true,
+  movable: true,
+  zoomable: true,
+  rotatable: true,
+  scalable: true,
+  transition: true,
+  fullscreen: false,
+  keyboard: true,
+  initialCoverage: 0.9,
+};
 
 const loadImage = async () => {
   loading.value = true;
@@ -50,59 +74,15 @@ const loadImage = async () => {
     imageSrc.value = `/api/files/download?path=${encodeURIComponent(props.filePath)}`;
     fileName.value = props.filePath.split('/').pop() || '';
 
-    // Wait for image to load
-    if (imageRef.value) {
-      imageRef.value.onload = () => {
-        loading.value = false;
-        initializeViewer();
-      };
-      imageRef.value.onerror = () => {
-        loading.value = false;
-        error.value = 'Failed to load image';
-      };
-    }
+    await nextTick();
+    loading.value = false;
   } catch (e) {
     loading.value = false;
     error.value = e instanceof Error ? e.message : 'Failed to load image';
   }
 };
 
-const initializeViewer = () => {
-  if (!imageRef.value) return;
-
-  // Destroy existing viewer if any
-  if (viewer) {
-    viewer.destroy();
-  }
-
-  viewer = new Viewer(imageRef.value, {
-    inline: true,
-    viewed() {
-      // Show viewer after image is loaded
-    },
-    navbar: false,
-    title: false,
-    toolbar: {
-      zoomIn: true,
-      zoomOut: true,
-      oneToOne: true,
-      reset: true,
-      prev: false,
-      play: false,
-      next: false,
-      rotateLeft: true,
-      rotateRight: true,
-      flipHorizontal: true,
-      flipVertical: true,
-    },
-  });
-};
-
 const close = () => {
-  if (viewer) {
-    viewer.destroy();
-    viewer = null;
-  }
   emit('close');
 };
 
@@ -110,18 +90,8 @@ watch(() => props.isOpen, (newValue) => {
   if (newValue) {
     loadImage();
   } else {
-    if (viewer) {
-      viewer.destroy();
-      viewer = null;
-    }
     imageSrc.value = '';
     error.value = null;
-  }
-});
-
-onBeforeUnmount(() => {
-  if (viewer) {
-    viewer.destroy();
   }
 });
 </script>
