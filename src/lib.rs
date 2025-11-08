@@ -112,8 +112,8 @@ pub enum ServerMessage {
 /// ALPN for the Kerr protocol
 pub const ALPN: &[u8] = b"kerr/0";
 
-/// Encode a NodeAddr as a compressed connection string (JSON -> gzip -> base64)
-pub fn encode_connection_string(addr: &iroh::NodeAddr) -> String {
+/// Encode an EndpointAddr as a compressed connection string (JSON -> gzip -> base64)
+pub fn encode_connection_string(addr: &iroh::EndpointAddr) -> String {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Write;
@@ -129,8 +129,8 @@ pub fn encode_connection_string(addr: &iroh::NodeAddr) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&compressed)
 }
 
-/// Decode a compressed connection string to NodeAddr (base64 -> gzip -> JSON)
-pub fn decode_connection_string(connection_string: &str) -> Result<iroh::NodeAddr, Box<dyn std::error::Error>> {
+/// Decode a compressed connection string to EndpointAddr (base64 -> gzip -> JSON)
+pub fn decode_connection_string(connection_string: &str) -> Result<iroh::EndpointAddr, Box<dyn std::error::Error>> {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
@@ -144,6 +144,6 @@ pub fn decode_connection_string(connection_string: &str) -> Result<iroh::NodeAdd
     decoder.read_to_string(&mut addr_json)?;
 
     // Parse JSON
-    let addr: iroh::NodeAddr = serde_json::from_str(&addr_json)?;
+    let addr: iroh::EndpointAddr = serde_json::from_str(&addr_json)?;
     Ok(addr)
 }
