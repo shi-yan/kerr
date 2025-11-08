@@ -55,15 +55,14 @@ async fn unregister_from_backend(alias: String) -> Result<()> {
 }
 
 pub async fn run_server(register_alias: Option<String>) -> Result<()> {
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Build our protocol handler and add our protocol, identified by its ALPN, and spawn the node.
-    let router = Router::builder(endpoint).accept(ALPN, KerrServer).spawn();
+    let router = Router::builder(endpoint).accept(ALPN.to_vec(), KerrServer).spawn();
 
-    // Wait for the node to be online
-    router.endpoint().online().await;
-
-    let addr = router.endpoint().node_addr();
+    // Get the node address from the router's endpoint
+    let node_id = router.endpoint().id();
+    let addr = router.endpoint().addr();
 
     // Encode the address as a compressed connection string (JSON -> gzip -> base64)
     let connection_string = crate::encode_connection_string(&addr);
@@ -271,7 +270,7 @@ struct KerrServer;
 
 impl ProtocolHandler for KerrServer {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let node_id = connection.remote_node_id()?;
+        let node_id = connection.remote_id();
         println!("\r\nAccepted connection from {node_id}\r");
 
         // Accept a bi-directional stream

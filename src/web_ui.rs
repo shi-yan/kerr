@@ -26,7 +26,7 @@ struct Asset;
 struct AppState {
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
-    node_addr: Arc<Mutex<Option<iroh::NodeAddr>>>,
+    node_addr: Arc<Mutex<Option<iroh::EndpointAddr>>>,
     connection_string: Arc<Mutex<Option<String>>>,
     connection_alias: Arc<Mutex<Option<String>>>,
 }
@@ -34,10 +34,7 @@ struct AppState {
 /// Run the web UI server
 pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
     // Create endpoint for future connections
-    let endpoint = iroh::endpoint::Endpoint::builder()
-        .discovery_n0()
-        .bind()
-        .await?;
+    let endpoint = iroh::endpoint::Endpoint::bind().await?;
 
     // If connection string is provided, connect immediately
     let (node_addr, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
@@ -92,7 +89,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
 /// Connect to a remote host
 async fn connect_to_remote(
     endpoint: &iroh::endpoint::Endpoint,
-    addr: &iroh::NodeAddr,
+    addr: &iroh::EndpointAddr,
 ) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
     eprintln!("[CONNECT] Connecting to remote host...");
     // Connect to the remote host
@@ -411,7 +408,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                         // Convert bytes to string for WebSocket
                         let text = String::from_utf8_lossy(&data).to_string();
                         eprintln!("[WS->SHELL] Sending output to WebSocket: {} bytes", text.len());
-                        if let Err(e) = ws_sender.send(Message::Text(text)).await {
+                        if let Err(e) = ws_sender.send(Message::Text(text.into())).await {
                             eprintln!("[WS->SHELL] Failed to send to WebSocket: {}", e);
                             break;
                         }
@@ -419,7 +416,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                     crate::ServerMessage::Error { message } => {
                         let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
                         eprintln!("[WS->SHELL] Sending error to WebSocket: {}", message);
-                        if let Err(e) = ws_sender.send(Message::Text(error_msg)).await {
+                        if let Err(e) = ws_sender.send(Message::Text(error_msg.into())).await {
                             eprintln!("[WS->SHELL] Failed to send error to WebSocket: {}", e);
                             break;
                         }

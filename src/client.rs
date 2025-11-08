@@ -81,13 +81,13 @@ pub async fn run_client(connection_string: String) -> Result<()> {
     let addr = crate::decode_connection_string(&connection_string)
         .expect("Failed to decode connection string");
 
-    println!("Connecting to: {}", addr.node_id);
+    println!("Connecting to: {}", addr.id);
 
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Open a connection to the accepting node
     println!("Connecting to Kerr server...");
-    let conn = endpoint.connect(addr, ALPN).await?;
+    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     println!("Connected! Starting terminal session...");
     println!("Press Ctrl+D to disconnect.");
 
@@ -295,8 +295,8 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let conn = endpoint.connect(addr, ALPN).await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
     // Send Hello message to indicate this is a file transfer session
@@ -484,8 +484,8 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let conn = endpoint.connect(addr, ALPN).await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
     // Send Hello message to indicate this is a file transfer session
@@ -599,8 +599,8 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let conn = endpoint.connect(addr, ALPN).await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
     // Send Hello message to indicate this is a ping test session
@@ -729,8 +729,8 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
         .expect("Failed to decode connection string");
 
     println!("Connecting to server for file browsing...");
-    let endpoint = Endpoint::builder().discovery_n0().bind().await?;
-    let conn = endpoint.connect(addr, ALPN).await?;
+    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     let (mut send, recv) = conn.open_bi().await.e()?;
 
@@ -785,9 +785,7 @@ pub async fn run_tcp_relay(
     let node_addr = crate::decode_connection_string(connection_string)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
 
-    let endpoint = iroh::Endpoint::builder()
-        .discovery(iroh::discovery::dns::DnsDiscovery::n0_dns())
-        .bind()
+    let endpoint = iroh::Endpoint::bind()
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
 
