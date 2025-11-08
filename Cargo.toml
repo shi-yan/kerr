@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iroh = "0.93.1"
+iroh = "0.95.1"
 n0-snafu = "0.2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -26,22 +26,22 @@ chrono = "0.4"
 ratatui-image = "8.0"
 image = "0.25"
 async-trait = "0.1"
-flate2 = "1.0"
-blake3 = "1.5"
+flate2 = "1.1"
+blake3 = "1.8"
 tui-menu = "0.3"
 tokio-util = "0.7"
 url = "2.5"
-rand = "0.8"
+rand = "0.9"
 reqwest = { version = "0.12", features = ["json"] }
-directories = "5.0"
+directories = "6.0"
 hostname = "0.4"
 tui-widget-list = "0.13"
 lazy_static = "1.5"
-axum = { version = "0.7", features = ["ws", "multipart"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
-rust-embed = "8.5"
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+rust-embed = "8.9"
 mime_guess = "2.0"
 
 [build-dependencies]
-which = "6.0"
+which = "8.0"
