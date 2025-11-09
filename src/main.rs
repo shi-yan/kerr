@@ -25,6 +25,9 @@ enum Commands {
         /// Path to session file (optional, defaults to standard config directory)
         #[arg(long)]
         session: Option<String>,
+        /// Path to log file (logs will be appended with timestamps)
+        #[arg(long)]
+        log: Option<String>,
     },
     /// Connect to a Kerr server
     Connect {
@@ -89,7 +92,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { register, session } => {
+        Commands::Serve { register, session, log } => {
+            // Initialize logging if log file is specified
+            if let Some(log_file) = &log {
+                if let Err(e) = kerr::logging::init_server_logging(log_file) {
+                    eprintln!("Failed to initialize logging: {}", e);
+                    eprintln!("Continuing without file logging...");
+                    kerr::logging::init_console_logging();
+                }
+            } else {
+                kerr::logging::init_console_logging();
+            }
+
             kerr::server::run_server(register, session).await?;
         }
         Commands::Connect { connection_string } => {
