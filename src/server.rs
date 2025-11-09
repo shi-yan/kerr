@@ -54,14 +54,18 @@ async fn unregister_from_backend(alias: String) -> Result<()> {
     crate::auth::unregister_connection(alias).await
 }
 
-pub async fn run_server(register_alias: Option<String>) -> Result<()> {
+pub async fn run_server(register_alias: Option<String>, session_path: Option<String>) -> Result<()> {
+    // Print session status
+    crate::auth::print_session_status(session_path);
+    println!();
+
     let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Build our protocol handler and add our protocol, identified by its ALPN, and spawn the node.
     let router = Router::builder(endpoint).accept(ALPN.to_vec(), KerrServer).spawn();
 
     // Get the node address from the router's endpoint
-    let node_id = router.endpoint().id();
+    let _node_id = router.endpoint().id();
     let addr = router.endpoint().addr();
 
     // Encode the address as a compressed connection string (JSON -> gzip -> base64)

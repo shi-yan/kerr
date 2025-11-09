@@ -70,8 +70,8 @@ pub struct ConnectionsListResponse {
 
 /// Generate a random state token for CSRF protection
 fn generate_state_token() -> String {
-    let mut rng = rand::thread_rng();
-    let token: [u8; 32] = rng.r#gen();
+    let mut rng = rand::rng();
+    let token: [u8; 32] = rng.random();
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &token)
 }
 
@@ -140,6 +140,16 @@ fn get_config_dir() -> Result<PathBuf> {
     Ok(config_dir.to_path_buf())
 }
 
+/// Get the session file path, using custom path if provided
+pub fn get_session_file_path(custom_path: Option<String>) -> Result<PathBuf> {
+    if let Some(path) = custom_path {
+        Ok(PathBuf::from(path))
+    } else {
+        let config_dir = get_config_dir()?;
+        Ok(config_dir.join("session.json"))
+    }
+}
+
 /// Save session data to session.json in the config directory
 fn save_session(session_data: &LoginResponse) -> Result<()> {
     let config_dir = get_config_dir()?;
@@ -156,10 +166,9 @@ fn save_session(session_data: &LoginResponse) -> Result<()> {
     Ok(())
 }
 
-/// Load session data from session.json in the config directory
-pub fn load_session() -> Result<LoginResponse> {
-    let config_dir = get_config_dir()?;
-    let session_file = config_dir.join("session.json");
+/// Load session data from session.json, using custom path if provided
+pub fn load_session_from_path(custom_path: Option<String>) -> Result<LoginResponse> {
+    let session_file = get_session_file_path(custom_path)?;
 
     if !session_file.exists() {
         return Err(n0_snafu::Error::anyhow(anyhow::anyhow!(
@@ -176,10 +185,35 @@ pub fn load_session() -> Result<LoginResponse> {
     Ok(session_data)
 }
 
+/// Load session data from session.json in the config directory
+pub fn load_session() -> Result<LoginResponse> {
+    load_session_from_path(None)
+}
+
 /// Get the session ID from the saved session
 pub fn get_session_id() -> Result<String> {
     let session = load_session()?;
     Ok(session.session_id)
+}
+
+/// Print session status - either logged in with session info or not logged in
+pub fn print_session_status(custom_session_path: Option<String>) {
+    match get_session_file_path(custom_session_path.clone()) {
+        Ok(session_file) => {
+            match load_session_from_path(custom_session_path) {
+                Ok(session) => {
+                    println!("Session file: {}", session_file.display());
+                    println!("Session ID: {}", session.session_id);
+                }
+                Err(_) => {
+                    println!("Not logged in");
+                }
+            }
+        }
+        Err(_) => {
+            println!("Not logged in");
+        }
+    }
 }
 
 /// Exchange the authorization code with the backend server

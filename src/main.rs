@@ -22,6 +22,9 @@ enum Commands {
         /// Register this connection with the backend server using the provided alias
         #[arg(long)]
         register: Option<String>,
+        /// Path to session file (optional, defaults to standard config directory)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Connect to a Kerr server
     Connect {
@@ -86,8 +89,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { register } => {
-            kerr::server::run_server(register).await?;
+        Commands::Serve { register, session } => {
+            kerr::server::run_server(register, session).await?;
         }
         Commands::Connect { connection_string } => {
             kerr::client::run_client(connection_string).await?;
