@@ -277,10 +277,15 @@ impl ProtocolHandler for KerrServer {
         let node_id = connection.remote_id();
         println!("\r\nAccepted connection from {node_id}\r");
 
+        // Create session ID for logging
+        let session_id = node_id.to_string();
+        let session_id_short = &session_id[..8];
+
         // Accept a bi-directional stream
         eprintln!("\r\n[SERVER] Calling accept_bi...\r");
         let (send, mut recv) = connection.accept_bi().await?;
         eprintln!("\r\n[SERVER] accept_bi successful!\r");
+        debug_log::log_bi_stream_accepted(session_id_short);
 
         // Read the Hello message to determine session type
         let config = bincode::config::standard();
@@ -288,6 +293,7 @@ impl ProtocolHandler for KerrServer {
         let mut len_bytes = [0u8; 4];
         if recv.read_exact(&mut len_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message length\r");
+            debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message length");
             return Ok(());
         }
         let len = u32::from_be_bytes(len_bytes) as usize;
@@ -295,19 +301,26 @@ impl ProtocolHandler for KerrServer {
         let mut msg_bytes = vec![0u8; len];
         if recv.read_exact(&mut msg_bytes).await.is_err() {
             eprintln!("\r\nFailed to read Hello message\r");
+            debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message body");
             return Ok(());
         }
+
+        debug_log::log_quic_read_done(session_id_short, msg_bytes.len());
 
         let hello_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
             Ok((m, _)) => m,
             Err(e) => {
                 eprintln!("\r\nFailed to deserialize Hello message: {}\r", e);
+                debug_log::log_decode_failed(session_id_short, &e.to_string());
                 return Ok(());
             }
         };
 
         let session_type = match hello_msg {
-            crate::ClientMessage::Hello { session_type } => session_type,
+            crate::ClientMessage::Hello { session_type } => {
+                debug_log::log_hello_received(session_id_short, &format!("{:?}", session_type));
+                session_type
+            },
             _ => {
                 eprintln!("\r\nExpected Hello message, got something else\r");
                 return Ok(());
@@ -317,8 +330,6 @@ impl ProtocolHandler for KerrServer {
         match session_type {
             crate::SessionType::Shell => {
                 println!("\r\nStarting shell session for {node_id}\r");
-                let session_id = node_id.to_string();
-                debug_log::log_session_start(&session_id[..8]);
                 Self::handle_shell_session(node_id, send, recv).await
             }
             crate::SessionType::FileTransfer => {
@@ -351,10 +362,14 @@ impl KerrServer {
         let session_id = node_id.to_string();
         let session_id = &session_id[..8];
 
+        debug_log::log_session_start(session_id);
+        debug_log::log_connection_accepted(session_id, &node_id.to_string());
+
         // Create a PTY system
         let pty_system = native_pty_system();
 
         // Create a PTY with initial size
+        debug_log::log_pty_creation_start(session_id, 80, 24);
         let pair = pty_system
             .openpty(PtySize {
                 rows: 24,
@@ -362,7 +377,17 @@ impl KerrServer {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| AcceptError::from_err(PtyError(format!("Failed to open PTY: {}", e))))?;
+            .map_err(|e| {
+                debug_log::log_pty_creation_failed(session_id, &e.to_string());
+                AcceptError::from_err(PtyError(format!("Failed to open PTY: {}", e)))
+            })?;
+
+        // Get PTY file descriptor for logging (if available)
+        if let Some(pty_fd) = pair.master.as_raw_fd() {
+            debug_log::log_pty_created(session_id, pty_fd);
+        } else {
+            debug_log::log_debug(session_id, "PTY_CREATED: success (fd unknown)");
+        }
 
         // Spawn bash in the PTY with custom prompt
         // Use 'bash -c' to set PS1 and then exec bash to replace the process
@@ -377,10 +402,19 @@ impl KerrServer {
         cmd.arg(&prompt_cmd);
         cmd.env("TERM", "xterm-256color");
 
-        let _child = pair
+        debug_log::log_bash_spawn_start(session_id);
+        let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| AcceptError::from_err(PtyError(format!("Failed to spawn bash: {}", e))))?;
+            .map_err(|e| {
+                debug_log::log_bash_spawn_failed(session_id, &e.to_string());
+                AcceptError::from_err(PtyError(format!("Failed to spawn bash: {}", e)))
+            })?;
+
+        // Log bash PID if available
+        if let Some(pid) = child.process_id() {
+            debug_log::log_bash_spawned(session_id, pid);
+        }
 
         println!("Spawned bash in PTY for {node_id}\r");
 
@@ -515,25 +549,34 @@ impl KerrServer {
 
                 // Read message from client
                 result = async {
+                    debug_log::log_quic_read_start(session_id);
                     let mut len_bytes = [0u8; 4];
                     if recv.read_exact(&mut len_bytes).await.is_err() {
+                        debug_log::log_quic_read_failed(session_id, "failed to read message length");
                         return None;
                     }
                     let len = u32::from_be_bytes(len_bytes) as usize;
 
                     let mut msg_bytes = vec![0u8; len];
                     if recv.read_exact(&mut msg_bytes).await.is_err() {
+                        debug_log::log_quic_read_failed(session_id, "failed to read message body");
                         return None;
                     }
 
+                    debug_log::log_quic_read_done(session_id, msg_bytes.len());
                     Some(msg_bytes)
                 } => {
                     match result {
                         Some(msg_bytes) => {
+                            debug_log::log_decode_start(session_id, msg_bytes.len());
                             // Deserialize message
                             let msg: ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                                Ok((m, _)) => m,
+                                Ok((m, _)) => {
+                                    debug_log::log_decode_done(session_id, "ClientMessage");
+                                    m
+                                },
                                 Err(e) => {
+                                    debug_log::log_decode_failed(session_id, &e.to_string());
                                     eprintln!("\r\nFailed to deserialize message: {}\r", e);
                                     continue;
                                 }

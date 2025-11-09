@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::custom_explorer::filesystem::{Filesystem, RemoteFilesystem};
+use crate::debug_log;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -311,6 +312,12 @@ enum TerminalMessage {
 
 /// Handle shell WebSocket connection
 async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
+    // Create a session ID for logging
+    let session_id = format!("ws_{}", std::process::id());
+    let session_id_short = &session_id[..std::cmp::min(8, session_id.len())];
+
+    debug_log::log_ws_connection_start(session_id_short);
+
     // Get the node address
     let addr = {
         let addr_lock = state.node_addr.lock().await;
@@ -318,6 +325,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
             Some(a) => a.clone(),
             None => {
                 eprintln!("No connection available");
+                debug_log::log_debug(session_id_short, "ERROR: No connection available");
                 return;
             }
         }
@@ -325,24 +333,35 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Create a NEW connection for the shell session
     // (Each session type needs its own connection due to server architecture)
-    let conn = match state.endpoint.connect(addr, crate::ALPN).await {
-        Ok(c) => c,
+    debug_log::log_debug(session_id_short, &format!("Connecting to: {:?}", addr));
+    let conn = match state.endpoint.connect(addr.clone(), crate::ALPN).await {
+        Ok(c) => {
+            debug_log::log_connection_accepted(session_id_short, &format!("{:?}", addr));
+            c
+        },
         Err(e) => {
             eprintln!("Failed to connect for shell session: {}", e);
+            debug_log::log_debug(session_id_short, &format!("ERROR: Connection failed: {}", e));
             return;
         }
     };
 
     // Open bidirectional stream for shell session
+    debug_log::log_debug(session_id_short, "Opening bidirectional stream");
     let (mut send, recv) = match conn.open_bi().await {
-        Ok(streams) => streams,
+        Ok(streams) => {
+            debug_log::log_bi_stream_accepted(session_id_short);
+            streams
+        },
         Err(e) => {
             eprintln!("Failed to open shell stream: {}", e);
+            debug_log::log_debug(session_id_short, &format!("ERROR: Failed to open bi stream: {}", e));
             return;
         }
     };
 
     // Send Hello message with Shell session type
+    debug_log::log_debug(session_id_short, "Sending Hello message with Shell session type");
     let hello_msg = crate::ClientMessage::Hello {
         session_type: crate::SessionType::Shell,
     };
@@ -350,6 +369,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
         Ok(data) => data,
         Err(e) => {
             eprintln!("Failed to encode hello message: {}", e);
+            debug_log::log_debug(session_id_short, &format!("ERROR: Failed to encode Hello: {}", e));
             return;
         }
     };
@@ -358,34 +378,46 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let len = (hello_data.len() as u32).to_be_bytes();
     if let Err(e) = send.write_all(&len).await {
         eprintln!("Failed to send hello message length: {}", e);
+        debug_log::log_debug(session_id_short, &format!("ERROR: Failed to send Hello length: {}", e));
         return;
     }
     if let Err(e) = send.write_all(&hello_data).await {
         eprintln!("Failed to send hello message: {}", e);
+        debug_log::log_debug(session_id_short, &format!("ERROR: Failed to send Hello data: {}", e));
         return;
     }
+    debug_log::log_debug(session_id_short, &format!("Hello message sent: {} bytes", hello_data.len()));
 
     let send = Arc::new(Mutex::new(send));
     let recv = Arc::new(Mutex::new(recv));
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
+    // Clone session_id for the spawned tasks
+    let session_id_shell_to_ws = session_id_short.to_string();
+    let session_id_ws_to_shell = session_id_short.to_string();
+
     // Spawn task to read from remote shell and send to WebSocket
     let recv_clone = recv.clone();
     let shell_to_ws = tokio::spawn(async move {
+        debug_log::log_quic_to_ws_task_started(&session_id_shell_to_ws);
         let mut recv = recv_clone.lock().await;
+        let mut msg_count = 0;
         loop {
             // Read length prefix (4 bytes)
+            debug_log::log_quic_read_start(&session_id_shell_to_ws);
             let mut len_bytes = [0u8; 4];
             match recv.read_exact(&mut len_bytes).await {
                 Ok(()) => {},
                 Err(e) => {
                     eprintln!("[WS->SHELL] Failed to read message length: {}", e);
+                    debug_log::log_quic_read_failed(&session_id_shell_to_ws, &e.to_string());
                     break;
                 }
             }
             let len = u32::from_be_bytes(len_bytes) as usize;
             eprintln!("[WS->SHELL] Reading message of length: {}", len);
+            debug_log::log_quic_read_done(&session_id_shell_to_ws, len);
 
             // Read message data
             let mut msg_bytes = vec![0u8; len];
@@ -398,26 +430,33 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
             }
 
             // Decode as ServerMessage
+            debug_log::log_decode_start(&session_id_shell_to_ws, msg_bytes.len());
             if let Ok((msg, _)) = bincode::decode_from_slice::<crate::ServerMessage, _>(
                 &msg_bytes,
                 bincode::config::standard()
             ) {
+                debug_log::log_decode_done(&session_id_shell_to_ws, "ServerMessage");
                 eprintln!("[WS->SHELL] Decoded message successfully");
+                msg_count += 1;
                 match msg {
                     crate::ServerMessage::Output { data } => {
                         // Convert bytes to string for WebSocket
                         let text = String::from_utf8_lossy(&data).to_string();
                         eprintln!("[WS->SHELL] Sending output to WebSocket: {} bytes", text.len());
+                        debug_log::log_ws_msg_sent(&session_id_shell_to_ws, text.len());
                         if let Err(e) = ws_sender.send(Message::Text(text.into())).await {
                             eprintln!("[WS->SHELL] Failed to send to WebSocket: {}", e);
+                            debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS send failed: {}", e));
                             break;
                         }
                     }
                     crate::ServerMessage::Error { message } => {
                         let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
                         eprintln!("[WS->SHELL] Sending error to WebSocket: {}", message);
+                        debug_log::log_debug(&session_id_shell_to_ws, &format!("Sending error to WS: {}", message));
                         if let Err(e) = ws_sender.send(Message::Text(error_msg.into())).await {
                             eprintln!("[WS->SHELL] Failed to send error to WebSocket: {}", e);
+                            debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS error send failed: {}", e));
                             break;
                         }
                     }
@@ -425,21 +464,27 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
             } else {
                 eprintln!("[WS->SHELL] Failed to decode message");
+                debug_log::log_decode_failed(&session_id_shell_to_ws, "ServerMessage decode failed");
             }
         }
+        debug_log::log_quic_to_ws_task_ended(&session_id_shell_to_ws, &format!("processed {} messages", msg_count));
         eprintln!("[WS->SHELL] shell_to_ws task ended");
     });
 
     // Spawn task to read from WebSocket and send to remote shell
     let ws_to_shell = tokio::spawn(async move {
+        debug_log::log_ws_to_quic_task_started(&session_id_ws_to_shell);
+        let mut msg_count = 0;
         while let Some(Ok(msg)) = ws_receiver.next().await {
             if let Message::Text(text) = msg {
                 eprintln!("[SHELL->WS] Received WebSocket message: {} bytes", text.len());
+                debug_log::log_ws_msg_received(&session_id_ws_to_shell, text.len());
                 // Parse terminal message
                 if let Ok(term_msg) = serde_json::from_str::<TerminalMessage>(&text) {
                     match term_msg {
                         TerminalMessage::Input { data } => {
                             eprintln!("[SHELL->WS] Terminal input: {} bytes", data.len());
+                            debug_log::log_debug(&session_id_ws_to_shell, &format!("Terminal input: {} bytes", data.len()));
                             let client_msg = crate::ClientMessage::KeyEvent {
                                 data: data.into_bytes(),
                             };
@@ -447,44 +492,57 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                                 // Send length prefix (4 bytes) then message
                                 let len = (msg_data.len() as u32).to_be_bytes();
                                 let mut send = send.lock().await;
+                                debug_log::log_quic_write_start(&session_id_ws_to_shell, msg_data.len() + 4);
                                 if let Err(e) = send.write_all(&len).await {
                                     eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
+                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, 4, &e.to_string());
                                     break;
                                 }
                                 if let Err(e) = send.write_all(&msg_data).await {
                                     eprintln!("[SHELL->WS] Failed to send message: {}", e);
+                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, msg_data.len(), &e.to_string());
                                     break;
                                 }
+                                debug_log::log_quic_write_done(&session_id_ws_to_shell, msg_data.len() + 4);
                                 eprintln!("[SHELL->WS] Sent KeyEvent message");
+                                msg_count += 1;
                             }
                         }
                         TerminalMessage::Resize { cols, rows } => {
                             eprintln!("[SHELL->WS] Terminal resize: {}x{}", cols, rows);
+                            debug_log::log_debug(&session_id_ws_to_shell, &format!("Terminal resize: {}x{}", cols, rows));
                             let client_msg = crate::ClientMessage::Resize { cols, rows };
                             if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
                                 // Send length prefix (4 bytes) then message
                                 let len = (msg_data.len() as u32).to_be_bytes();
                                 let mut send = send.lock().await;
+                                debug_log::log_quic_write_start(&session_id_ws_to_shell, msg_data.len() + 4);
                                 if let Err(e) = send.write_all(&len).await {
                                     eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
+                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, 4, &e.to_string());
                                     break;
                                 }
                                 if let Err(e) = send.write_all(&msg_data).await {
                                     eprintln!("[SHELL->WS] Failed to send message: {}", e);
+                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, msg_data.len(), &e.to_string());
                                     break;
                                 }
+                                debug_log::log_quic_write_done(&session_id_ws_to_shell, msg_data.len() + 4);
                                 eprintln!("[SHELL->WS] Sent Resize message");
+                                msg_count += 1;
                             }
                         }
                     }
                 } else {
                     eprintln!("[SHELL->WS] Failed to parse terminal message");
+                    debug_log::log_debug(&session_id_ws_to_shell, "ERROR: Failed to parse terminal message");
                 }
             }
         }
 
         // Send disconnect message
         eprintln!("[SHELL->WS] Sending disconnect message");
+        debug_log::log_debug(&session_id_ws_to_shell, "Sending disconnect message");
         let disconnect_msg = crate::ClientMessage::Disconnect;
         if let Ok(msg_data) = bincode::encode_to_vec(&disconnect_msg, bincode::config::standard()) {
             let len = (msg_data.len() as u32).to_be_bytes();
@@ -492,6 +550,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
             let _ = send.write_all(&len).await;
             let _ = send.write_all(&msg_data).await;
         }
+        debug_log::log_ws_to_quic_task_ended(&session_id_ws_to_shell, &format!("sent {} messages", msg_count));
         eprintln!("[SHELL->WS] ws_to_shell task ended");
     });
 
