@@ -298,7 +298,13 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_shell_socket(socket, state))
+    eprintln!("[WEBSOCKET] WebSocket upgrade request received for /ws/shell");
+    tracing::info!("WebSocket upgrade request received for /ws/shell");
+    ws.on_upgrade(move |socket| {
+        eprintln!("[WEBSOCKET] WebSocket upgraded, calling handle_shell_socket");
+        tracing::info!("WebSocket upgraded successfully, calling handle_shell_socket");
+        handle_shell_socket(socket, state)
+    })
 }
 
 #[derive(Deserialize, Serialize)]
