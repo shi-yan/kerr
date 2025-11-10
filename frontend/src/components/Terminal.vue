@@ -102,27 +102,32 @@ const connectWebSocket = () => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${window.location.host}/ws/shell`;
 
+  console.log('[TERMINAL] Connecting to WebSocket:', wsUrl);
   connectionStatus.value = 'connecting';
 
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
+    console.log('[TERMINAL] WebSocket connection opened successfully');
     connectionStatus.value = 'connected';
     terminal?.writeln('Connected to remote shell...\r\n');
   };
 
   ws.onmessage = (event) => {
+    console.log('[TERMINAL] Received message from server:', event.data?.substring(0, 100));
     if (terminal && event.data) {
       terminal.write(event.data);
     }
   };
 
-  ws.onerror = () => {
+  ws.onerror = (error) => {
+    console.error('[TERMINAL] WebSocket error:', error);
     connectionStatus.value = 'error';
     terminal?.writeln('\r\n\x1b[31mWebSocket error occurred\x1b[0m\r\n');
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    console.log('[TERMINAL] WebSocket connection closed. Code:', event.code, 'Reason:', event.reason, 'Clean:', event.wasClean);
     connectionStatus.value = 'disconnected';
     terminal?.writeln('\r\n\x1b[33mConnection closed\x1b[0m\r\n');
   };
@@ -175,10 +180,14 @@ onMounted(async () => {
   // Handle terminal input
   terminal.onData((data) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+      const msg = {
         type: 'input',
         data: data,
-      }));
+      };
+      console.log('[TERMINAL] Sending input:', data.length, 'bytes');
+      ws.send(JSON.stringify(msg));
+    } else {
+      console.warn('[TERMINAL] Cannot send input, WebSocket not open. State:', ws?.readyState);
     }
   });
 
@@ -187,11 +196,13 @@ onMounted(async () => {
     if (fitAddon && terminal) {
       fitAddon.fit();
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
+        const msg = {
           type: 'resize',
           cols: terminal.cols,
           rows: terminal.rows,
-        }));
+        };
+        console.log('[TERMINAL] Sending resize:', msg.cols, 'x', msg.rows);
+        ws.send(JSON.stringify(msg));
       }
     }
   };
@@ -213,10 +224,12 @@ onMounted(async () => {
   }
 
   // Connect WebSocket
+  console.log('[TERMINAL] Component mounted, initializing WebSocket connection...');
   connectWebSocket();
 
   // Cleanup
   onBeforeUnmount(() => {
+    console.log('[TERMINAL] Component unmounting, cleaning up...');
     window.removeEventListener('resize', handleResize);
     resizeObserver.disconnect();
     if (ws) {

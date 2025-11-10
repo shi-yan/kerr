@@ -52,6 +52,7 @@ const checkConnectionStatus = async () => {
 const handleConnected = async () => {
   console.log('[App] handleConnected called');
   connected.value = true;
+  console.log('[App] Connected state set to true, Terminal component should now be rendered');
   // Fetch connection string after connecting
   await checkConnectionStatus();
 };
