@@ -28,6 +28,7 @@ struct AppState {
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
     node_addr: Arc<Mutex<Option<iroh::EndpointAddr>>>,
+    connection: Arc<Mutex<Option<iroh::endpoint::Connection>>>,
     connection_string: Arc<Mutex<Option<String>>>,
     connection_alias: Arc<Mutex<Option<String>>>,
 }
@@ -38,16 +39,16 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
     let endpoint = iroh::endpoint::Endpoint::bind().await?;
 
     // If connection string is provided, connect immediately
-    let (node_addr, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
+    let (node_addr, connection, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
         println!("Connecting to remote host...");
         let addr = crate::decode_connection_string(&conn_str)
             .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
-        let (_conn, fs) = connect_to_remote(&endpoint, &addr).await?;
+        let (conn, fs) = connect_to_remote(&endpoint, &addr).await?;
         println!("Connected! Setting up file browser session...");
-        (Some(addr), Some(Arc::new(fs)), Some(conn_str), None)
+        (Some(addr), Some(conn), Some(Arc::new(fs)), Some(conn_str), None)
     } else {
         println!("Starting UI in connection selection mode...");
-        (None, None, None, None)
+        (None, None, None, None, None)
     };
 
     // Create application state
@@ -55,6 +56,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         remote_fs: Arc::new(Mutex::new(remote_fs)),
         endpoint: Arc::new(endpoint),
         node_addr: Arc::new(Mutex::new(node_addr)),
+        connection: Arc::new(Mutex::new(connection)),
         connection_string: Arc::new(Mutex::new(conn_str_stored)),
         connection_alias: Arc::new(Mutex::new(conn_alias)),
     });
@@ -234,11 +236,15 @@ async fn connect_to_connection(
 
     // Try to connect
     match connect_to_remote(&state.endpoint, &addr).await {
-        Ok((_conn, remote_fs)) => {
+        Ok((conn, remote_fs)) => {
             // Update state
             {
                 let mut state_addr = state.node_addr.lock().await;
                 *state_addr = Some(addr);
+            }
+            {
+                let mut state_conn = state.connection.lock().await;
+                *state_conn = Some(conn);
             }
             {
                 let mut state_fs = state.remote_fs.lock().await;
@@ -273,6 +279,10 @@ async fn disconnect_connection(
     {
         let mut state_fs = state.remote_fs.lock().await;
         *state_fs = None;
+    }
+    {
+        let mut state_conn = state.connection.lock().await;
+        *state_conn = None;
     }
     {
         let mut state_addr = state.node_addr.lock().await;
@@ -323,44 +333,39 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let session_id_short = &session_id[..std::cmp::min(8, session_id.len())];
 
     debug_log::log_ws_connection_start(session_id_short);
+    tracing::info!(session_id = session_id_short, "WebSocket shell connection started");
 
-    // Get the node address
-    let addr = {
-        let addr_lock = state.node_addr.lock().await;
-        match addr_lock.as_ref() {
-            Some(a) => a.clone(),
+    // Reuse the existing QUIC connection instead of creating a new one
+    // This allows multiple sessions (FileBrowser + Shell) over a single connection
+    let conn = {
+        let conn_lock = state.connection.lock().await;
+        match conn_lock.as_ref() {
+            Some(c) => {
+                tracing::info!(session_id = session_id_short, "Reusing existing QUIC connection for shell session");
+                debug_log::log_debug(session_id_short, "Reusing existing QUIC connection");
+                c.clone()
+            },
             None => {
-                eprintln!("No connection available");
+                eprintln!("[WEBSOCKET] No connection available");
+                tracing::error!(session_id = session_id_short, "No QUIC connection available");
                 debug_log::log_debug(session_id_short, "ERROR: No connection available");
                 return;
             }
         }
     };
 
-    // Create a NEW connection for the shell session
-    // (Each session type needs its own connection due to server architecture)
-    debug_log::log_debug(session_id_short, &format!("Connecting to: {:?}", addr));
-    let conn = match state.endpoint.connect(addr.clone(), crate::ALPN).await {
-        Ok(c) => {
-            debug_log::log_connection_accepted(session_id_short, &format!("{:?}", addr));
-            c
-        },
-        Err(e) => {
-            eprintln!("Failed to connect for shell session: {}", e);
-            debug_log::log_debug(session_id_short, &format!("ERROR: Connection failed: {}", e));
-            return;
-        }
-    };
-
-    // Open bidirectional stream for shell session
-    debug_log::log_debug(session_id_short, "Opening bidirectional stream");
+    // Open a new bidirectional stream on the existing connection
+    tracing::debug!(session_id = session_id_short, "Opening new bidirectional stream for shell session");
+    debug_log::log_debug(session_id_short, "Opening bidirectional stream on existing connection");
     let (mut send, recv) = match conn.open_bi().await {
         Ok(streams) => {
+            tracing::info!(session_id = session_id_short, "Bidirectional stream opened successfully for shell");
             debug_log::log_bi_stream_accepted(session_id_short);
             streams
         },
         Err(e) => {
-            eprintln!("Failed to open shell stream: {}", e);
+            eprintln!("[WEBSOCKET] Failed to open shell stream: {}", e);
+            tracing::error!(session_id = session_id_short, error = %e, "Failed to open bidirectional stream");
             debug_log::log_debug(session_id_short, &format!("ERROR: Failed to open bi stream: {}", e));
             return;
         }
