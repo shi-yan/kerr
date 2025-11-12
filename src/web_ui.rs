@@ -28,7 +28,7 @@ struct AppState {
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
     node_addr: Arc<Mutex<Option<iroh::EndpointAddr>>>,
-    connection: Arc<Mutex<Option<iroh::endpoint::Connection>>>,
+    connection: Arc<Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
     connection_string: Arc<Mutex<Option<String>>>,
     connection_alias: Arc<Mutex<Option<String>>>,
 }
@@ -45,7 +45,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
         let (conn, fs) = connect_to_remote(&endpoint, &addr).await?;
         println!("Connected! Setting up file browser session...");
-        (Some(addr), Some(conn), Some(Arc::new(fs)), Some(conn_str), None)
+        (Some(addr), Some(Arc::new(conn)), Some(Arc::new(fs)), Some(conn_str), None)
     } else {
         println!("Starting UI in connection selection mode...");
         (None, None, None, None, None)
@@ -244,7 +244,7 @@ async fn connect_to_connection(
             }
             {
                 let mut state_conn = state.connection.lock().await;
-                *state_conn = Some(conn);
+                *state_conn = Some(Arc::new(conn));
             }
             {
                 let mut state_fs = state.remote_fs.lock().await;
@@ -342,8 +342,8 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
         match conn_lock.as_ref() {
             Some(c) => {
                 tracing::info!(session_id = session_id_short, "Reusing existing QUIC connection for shell session");
-                debug_log::log_debug(session_id_short, "Reusing existing QUIC connection");
-                c.clone()
+                debug_log::log_debug(session_id_short, "Reusing existing QUIC connection (Arc::clone)");
+                Arc::clone(c)  // Clone the Arc, NOT the Connection!
             },
             None => {
                 eprintln!("[WEBSOCKET] No connection available");
@@ -356,7 +356,7 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Open a new bidirectional stream on the existing connection
     tracing::debug!(session_id = session_id_short, "Opening new bidirectional stream for shell session");
-    debug_log::log_debug(session_id_short, "Opening bidirectional stream on existing connection");
+    debug_log::log_debug(session_id_short, "Opening stream on SHARED connection (not creating new connection)");
     let (mut send, recv) = match conn.open_bi().await {
         Ok(streams) => {
             tracing::info!(session_id = session_id_short, "Bidirectional stream opened successfully for shell");
