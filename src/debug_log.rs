@@ -1,47 +1,17 @@
 //! Debug logging module for tracking shell session data flow
 //!
-//! Logs to ~/.kerr_debug.log to avoid interfering with shell display
+//! Uses tracing framework - logs go to file specified by --log or to stderr
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::sync::Mutex;
-
-lazy_static::lazy_static! {
-    static ref LOG_FILE: Mutex<Option<std::fs::File>> = {
-        // Try to open log file in user's home directory
-        let log_path = match std::env::var("HOME") {
-            Ok(home) => format!("{}/.kerr_debug.log", home),
-            Err(_) => "/tmp/kerr_debug.log".to_string(),
-        };
-
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(file) => {
-                eprintln!("\r\n[DEBUG] Logging to: {}\r", log_path);
-                Mutex::new(Some(file))
-            }
-            Err(e) => {
-                eprintln!("\r\n[DEBUG] Failed to open log file {}: {}\r", log_path, e);
-                Mutex::new(None)
-            }
-        }
-    };
+/// Log a debug message with session_id
+pub fn log_debug(session_id: &str, message: &str) {
+    tracing::debug!(session_id = session_id, "{}", message);
 }
 
-/// Log a debug message with timestamp
-pub fn log_debug(session_id: &str, message: &str) {
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-    let log_line = format!("[{}] [{}] {}\n", timestamp, session_id, message);
-
-    if let Ok(mut guard) = LOG_FILE.lock() {
-        if let Some(ref mut file) = *guard {
-            let _ = file.write_all(log_line.as_bytes());
-            let _ = file.flush();
-        }
-    }
+/// Log a new session starting with clear separator
+pub fn log_new_session_separator(session_id: &str, session_type: &str) {
+    tracing::info!("========================================");
+    tracing::info!("NEW SESSION: {} [{}]", session_type, session_id);
+    tracing::info!("========================================");
 }
 
 /// Log PTY read event

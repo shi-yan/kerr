@@ -336,6 +336,10 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let session_id_short = &session_id[..std::cmp::min(8, session_id.len())];
 
     eprintln!("[HANDLE_SHELL_SOCKET] Session ID created: {}", session_id_short);
+
+    // Log session start with clear separator
+    debug_log::log_new_session_separator(session_id_short, "WebSocket Shell");
+
     debug_log::log_ws_connection_start(session_id_short);
     tracing::info!(session_id = session_id_short, "WebSocket shell connection started");
 

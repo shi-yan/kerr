@@ -337,6 +337,9 @@ impl ProtocolHandler for KerrServer {
                 }
             };
 
+            // Log session start with clear separator
+            debug_log::log_new_session_separator(session_id_short, &format!("{:?}", session_type));
+
             // Spawn each session as a background task so we can accept more streams
             match session_type {
                 crate::SessionType::Shell => {
