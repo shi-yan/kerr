@@ -20,9 +20,12 @@
           </span>
         </span>
       </div>
-      <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
-        {{ connectionStatus }}
-      </span>
+      <div class="header-right">
+        <PortForwarding />
+        <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
+          {{ connectionStatus }}
+        </span>
+      </div>
     </div>
     <div ref="terminalRef" class="terminal"></div>
   </div>
@@ -33,6 +36,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import PortForwarding from './PortForwarding.vue';
 
 const terminalRef = ref<HTMLElement | null>(null);
 const connectionStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
@@ -263,6 +267,12 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .terminal-title {
