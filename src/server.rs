@@ -317,7 +317,10 @@ impl ProtocolHandler for KerrServer {
                 let sessions_clone = sessions.clone();
                 loop {
                     let envelope = match crate::recv_envelope(&mut recv).await {
-                        Ok(env) => env,
+                        Ok(env) => {
+                            tracing::debug!(node_id = %node_id_clone, "Received envelope");
+                            env
+                        },
                         Err(e) => {
                             tracing::info!(node_id = %node_id_clone, error = %e, "Stream closed or error");
                             break;
@@ -326,6 +329,7 @@ impl ProtocolHandler for KerrServer {
 
                     let session_id = envelope.session_id.clone();
                     let session_id_short = if session_id.len() >= 8 { &session_id[..8] } else { &session_id };
+                    tracing::debug!(node_id = %node_id_clone, session_id = %session_id, "Processing envelope for session");
 
                     match envelope.payload {
                         crate::MessagePayload::Client(client_msg) => {
@@ -410,13 +414,22 @@ impl ProtocolHandler for KerrServer {
                                 }
                             } else {
                                 // Route message to existing session
+                                tracing::debug!(session_id = %session_id, "Routing message to existing session");
                                 let sessions_lock = sessions_clone.lock().await;
+                                tracing::debug!("Session map contains {} sessions", sessions_lock.len());
                                 if let Some(session_tx) = sessions_lock.get(&session_id) {
+                                    tracing::debug!(session_id = %session_id, "Found session, sending message");
                                     if session_tx.send(client_msg).is_err() {
-                                        tracing::warn!(session_id = %session_id, "Failed to send to session");
+                                        tracing::warn!(session_id = %session_id, "Failed to send to session (channel closed)");
+                                    } else {
+                                        tracing::debug!(session_id = %session_id, "Message sent to session successfully");
                                     }
                                 } else {
-                                    tracing::warn!(session_id = %session_id, "Unknown session");
+                                    tracing::warn!(session_id = %session_id, "Unknown session - not found in session map");
+                                    // Log all known session IDs for debugging
+                                    for (id, _) in sessions_lock.iter() {
+                                        tracing::debug!("Known session: {}", id);
+                                    }
                                 }
                             }
                         }
