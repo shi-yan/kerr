@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use futures::{sink::SinkExt, stream::StreamExt};
+use futures::{sink::SinkExt, stream::StreamExt, FutureExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -310,10 +310,11 @@ async fn websocket_handler(
 ) -> impl IntoResponse {
     eprintln!("[WEBSOCKET] WebSocket upgrade request received for /ws/shell");
     tracing::info!("WebSocket upgrade request received for /ws/shell");
-    ws.on_upgrade(move |socket| {
-        eprintln!("[WEBSOCKET] WebSocket upgraded, calling handle_shell_socket");
+    ws.on_upgrade(move |socket| async move {
+        eprintln!("[WEBSOCKET] WebSocket upgraded, about to call handle_shell_socket");
         tracing::info!("WebSocket upgraded successfully, calling handle_shell_socket");
-        handle_shell_socket(socket, state)
+        handle_shell_socket(socket, state).await;
+        eprintln!("[WEBSOCKET] handle_shell_socket returned");
     })
 }
 
@@ -328,10 +329,13 @@ enum TerminalMessage {
 
 /// Handle shell WebSocket connection
 async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
+    eprintln!("[HANDLE_SHELL_SOCKET] Function entered!");
+
     // Create a session ID for logging
     let session_id = format!("ws_{}", std::process::id());
     let session_id_short = &session_id[..std::cmp::min(8, session_id.len())];
 
+    eprintln!("[HANDLE_SHELL_SOCKET] Session ID created: {}", session_id_short);
     debug_log::log_ws_connection_start(session_id_short);
     tracing::info!(session_id = session_id_short, "WebSocket shell connection started");
 
