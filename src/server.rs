@@ -1946,24 +1946,163 @@ impl KerrServer {
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<crate::ClientMessage>,
         outgoing: tokio::sync::mpsc::UnboundedSender<crate::MessageEnvelope>,
     ) -> Result<(), AcceptError> {
+        use tokio::net::TcpStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::collections::HashMap;
+
         tracing::info!(session_id = %session_id, "TCP relay session started (mux mode)");
+
+        // Shared state for tracking remote TCP connections
+        let tcp_connections: Arc<tokio::sync::Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         // Process incoming messages
         while let Some(msg) = incoming.recv().await {
             match msg {
-                crate::ClientMessage::TcpOpen { stream_id, .. } => {
-                    let response = crate::MessageEnvelope {
-                        session_id: session_id.clone(),
-                        payload: crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse {
-                            stream_id,
-                            success: false,
-                            error: Some("TCP relay not yet implemented in mux mode".to_string()),
-                        }),
-                    };
-                    let _ = outgoing.send(response);
+                crate::ClientMessage::TcpOpen { stream_id, destination_port } => {
+                    tracing::info!(session_id = %session_id, stream_id = stream_id, port = destination_port,
+                        "Opening TCP connection to localhost:{}", destination_port);
+
+                    // Try to connect to remote port
+                    match TcpStream::connect(format!("127.0.0.1:{}", destination_port)).await {
+                        Ok(tcp_stream) => {
+                            // Send success response
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse {
+                                    stream_id,
+                                    success: true,
+                                    error: None,
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+
+                            // Create channel for sending data to this TCP connection
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+                            tcp_connections.lock().await.insert(stream_id, tx);
+
+                            let outgoing_for_task = outgoing.clone();
+                            let tcp_connections_for_task = Arc::clone(&tcp_connections);
+                            let session_id_for_task = session_id.clone();
+
+                            // Spawn task to handle this TCP connection
+                            tokio::spawn(async move {
+                                let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+                                // Task to read from remote TCP and send to client
+                                let read_task = {
+                                    let outgoing_for_read = outgoing_for_task.clone();
+                                    let session_id_for_read = session_id_for_task.clone();
+                                    tokio::spawn(async move {
+                                        let mut buf = vec![0u8; 65536];
+                                        loop {
+                                            match tcp_read.read(&mut buf).await {
+                                                Ok(0) => {
+                                                    tracing::debug!(session_id = %session_id_for_read, stream_id = stream_id,
+                                                        "TCP connection EOF");
+                                                    break;
+                                                }
+                                                Ok(n) => {
+                                                    tracing::debug!(session_id = %session_id_for_read, stream_id = stream_id, bytes = n,
+                                                        "Read from remote TCP, sending to client");
+                                                    // Send data to client
+                                                    let response = crate::MessageEnvelope {
+                                                        session_id: session_id_for_read.clone(),
+                                                        payload: crate::MessagePayload::Server(crate::ServerMessage::TcpDataResponse {
+                                                            stream_id,
+                                                            data: buf[..n].to_vec(),
+                                                        }),
+                                                    };
+                                                    if outgoing_for_read.send(response).is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(session_id = %session_id_for_read, stream_id = stream_id, error = %e,
+                                                        "TCP read error");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    })
+                                };
+
+                                // Task to receive from client and write to remote TCP
+                                let session_id_for_write = session_id_for_task.clone();
+                                let write_task = tokio::spawn(async move {
+                                    while let Some(data) = rx.recv().await {
+                                        tracing::debug!(session_id = %session_id_for_write, stream_id = stream_id, bytes = data.len(),
+                                            "Writing to remote TCP");
+                                        if tcp_write.write_all(&data).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+
+                                // Wait for either task to complete
+                                tokio::select! {
+                                    _ = read_task => {}
+                                    _ = write_task => {}
+                                }
+
+                                // Send close response
+                                let close_response = crate::MessageEnvelope {
+                                    session_id: session_id_for_task.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::TcpCloseResponse {
+                                        stream_id,
+                                        error: None,
+                                    }),
+                                };
+                                let _ = outgoing_for_task.send(close_response);
+
+                                // Remove from connections map
+                                tcp_connections_for_task.lock().await.remove(&stream_id);
+                                tracing::info!(session_id = %session_id_for_task, stream_id = stream_id, "TCP connection closed");
+                            });
+                        }
+                        Err(e) => {
+                            // Send error response
+                            tracing::error!(session_id = %session_id, stream_id = stream_id, port = destination_port, error = %e,
+                                "Failed to connect to localhost:{}", destination_port);
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse {
+                                    stream_id,
+                                    success: false,
+                                    error: Some(format!("Failed to connect: {}", e)),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                        }
+                    }
                 }
-                crate::ClientMessage::Disconnect => break,
-                _ => {}
+                crate::ClientMessage::TcpData { stream_id, data } => {
+                    tracing::debug!(session_id = %session_id, stream_id = stream_id, bytes = data.len(),
+                        "Forwarding data to TCP connection");
+                    // Forward data to the appropriate TCP connection
+                    let connections = tcp_connections.lock().await;
+                    if let Some(tx) = connections.get(&stream_id) {
+                        if tx.send(data).await.is_err() {
+                            tracing::error!(session_id = %session_id, stream_id = stream_id,
+                                "Failed to forward data to TCP connection");
+                        }
+                    } else {
+                        tracing::warn!(session_id = %session_id, stream_id = stream_id,
+                            "Received data for unknown stream_id");
+                    }
+                }
+                crate::ClientMessage::TcpClose { stream_id } => {
+                    tracing::info!(session_id = %session_id, stream_id = stream_id, "Closing TCP connection");
+                    // Remove the connection (the task will detect the channel closure and clean up)
+                    tcp_connections.lock().await.remove(&stream_id);
+                }
+                crate::ClientMessage::Disconnect => {
+                    tracing::info!(session_id = %session_id, "Client requested disconnect");
+                    break;
+                }
+                _ => {
+                    tracing::warn!(session_id = %session_id, "Unexpected message type for TCP relay session");
+                }
             }
         }
 
