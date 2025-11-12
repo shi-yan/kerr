@@ -277,78 +277,112 @@ impl ProtocolHandler for KerrServer {
         let node_id = connection.remote_id();
         tracing::info!(node_id = %node_id, "Accepted connection");
 
-        // Create session ID for logging
-        let session_id = node_id.to_string();
-        let session_id_short = &session_id[..8];
+        // Loop to accept multiple streams from the same connection
+        // This allows FileBrowser + Shell + other sessions to coexist
+        loop {
+            // Accept a bi-directional stream
+            let (send, mut recv) = match connection.accept_bi().await {
+                Ok(streams) => streams,
+                Err(_) => {
+                    // Connection closed or error
+                    tracing::info!(node_id = %node_id, "Connection closed");
+                    break;
+                }
+            };
 
-        // Accept a bi-directional stream
-        tracing::debug!(session_id = session_id_short, "Calling accept_bi");
-        let (send, mut recv) = connection.accept_bi().await?;
-        tracing::debug!(session_id = session_id_short, "accept_bi successful");
-        debug_log::log_bi_stream_accepted(session_id_short);
+            // Create session ID for logging
+            let session_id = node_id.to_string();
+            let session_id_short = &session_id[..8];
 
-        // Read the Hello message to determine session type
-        let config = bincode::config::standard();
-        tracing::debug!(session_id = session_id_short, "Reading Hello message length");
-        let mut len_bytes = [0u8; 4];
-        if recv.read_exact(&mut len_bytes).await.is_err() {
-            tracing::error!(session_id = session_id_short, "Failed to read Hello message length");
-            debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message length");
-            return Ok(());
+            tracing::debug!(session_id = session_id_short, "Accepted new stream on existing connection");
+            debug_log::log_bi_stream_accepted(session_id_short);
+
+            // Read the Hello message to determine session type
+            let config = bincode::config::standard();
+            tracing::debug!(session_id = session_id_short, "Reading Hello message length");
+            let mut len_bytes = [0u8; 4];
+            if recv.read_exact(&mut len_bytes).await.is_err() {
+                tracing::error!(session_id = session_id_short, "Failed to read Hello message length");
+                debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message length");
+                continue; // Try to accept next stream
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            tracing::debug!(session_id = session_id_short, len = len, "Hello message length received");
+            let mut msg_bytes = vec![0u8; len];
+            if recv.read_exact(&mut msg_bytes).await.is_err() {
+                tracing::error!(session_id = session_id_short, "Failed to read Hello message");
+                debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message body");
+                continue; // Try to accept next stream
+            }
+
+            debug_log::log_quic_read_done(session_id_short, msg_bytes.len());
+
+            let hello_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok((m, _)) => m,
+                Err(e) => {
+                    tracing::error!(session_id = session_id_short, error = %e, "Failed to deserialize Hello message");
+                    debug_log::log_decode_failed(session_id_short, &e.to_string());
+                    continue; // Try to accept next stream
+                }
+            };
+
+            let session_type = match hello_msg {
+                crate::ClientMessage::Hello { session_type } => {
+                    debug_log::log_hello_received(session_id_short, &format!("{:?}", session_type));
+                    session_type
+                },
+                _ => {
+                    tracing::error!(session_id = session_id_short, "Expected Hello message, got something else");
+                    continue; // Try to accept next stream
+                }
+            };
+
+            // Spawn each session as a background task so we can accept more streams
+            match session_type {
+                crate::SessionType::Shell => {
+                    tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting shell session");
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_shell_session(node_id, send, recv).await {
+                            tracing::error!(node_id = %node_id, error = ?e, "Shell session error");
+                        }
+                    });
+                }
+                crate::SessionType::FileTransfer => {
+                    tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting file transfer session");
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_file_transfer_session(node_id, send, recv).await {
+                            tracing::error!(node_id = %node_id, error = ?e, "File transfer session error");
+                        }
+                    });
+                }
+                crate::SessionType::FileBrowser => {
+                    tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting file browser session");
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_file_browser_session(node_id, send, recv).await {
+                            tracing::error!(node_id = %node_id, error = ?e, "File browser session error");
+                        }
+                    });
+                }
+                crate::SessionType::TcpRelay => {
+                    tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting TCP relay session");
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_tcp_relay_session(node_id, send, recv).await {
+                            tracing::error!(node_id = %node_id, error = ?e, "TCP relay session error");
+                        }
+                    });
+                }
+                crate::SessionType::Ping => {
+                    tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting ping test session");
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_ping_session(node_id, send, recv).await {
+                            tracing::error!(node_id = %node_id, error = ?e, "Ping session error");
+                        }
+                    });
+                }
+            }
         }
-        let len = u32::from_be_bytes(len_bytes) as usize;
-        tracing::debug!(session_id = session_id_short, len = len, "Hello message length received");
-        let mut msg_bytes = vec![0u8; len];
-        if recv.read_exact(&mut msg_bytes).await.is_err() {
-            tracing::error!(session_id = session_id_short, "Failed to read Hello message");
-            debug_log::log_quic_read_failed(session_id_short, "failed to read Hello message body");
-            return Ok(());
-        }
 
-        debug_log::log_quic_read_done(session_id_short, msg_bytes.len());
-
-        let hello_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-            Ok((m, _)) => m,
-            Err(e) => {
-                tracing::error!(session_id = session_id_short, error = %e, "Failed to deserialize Hello message");
-                debug_log::log_decode_failed(session_id_short, &e.to_string());
-                return Ok(());
-            }
-        };
-
-        let session_type = match hello_msg {
-            crate::ClientMessage::Hello { session_type } => {
-                debug_log::log_hello_received(session_id_short, &format!("{:?}", session_type));
-                session_type
-            },
-            _ => {
-                tracing::error!(session_id = session_id_short, "Expected Hello message, got something else");
-                return Ok(());
-            }
-        };
-
-        match session_type {
-            crate::SessionType::Shell => {
-                tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting shell session");
-                Self::handle_shell_session(node_id, send, recv).await
-            }
-            crate::SessionType::FileTransfer => {
-                tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting file transfer session");
-                Self::handle_file_transfer_session(node_id, send, recv).await
-            }
-            crate::SessionType::FileBrowser => {
-                tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting file browser session");
-                Self::handle_file_browser_session(node_id, send, recv).await
-            }
-            crate::SessionType::TcpRelay => {
-                tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting TCP relay session");
-                Self::handle_tcp_relay_session(node_id, send, recv).await
-            }
-            crate::SessionType::Ping => {
-                tracing::info!(node_id = %node_id, session_id = session_id_short, "Starting ping test session");
-                Self::handle_ping_session(node_id, send, recv).await
-            }
-        }
+        Ok(())
     }
 }
 
