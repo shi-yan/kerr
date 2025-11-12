@@ -811,45 +811,32 @@ impl KerrServer {
         let outgoing_clone = outgoing.clone();
 
         // Task to read from PTY and send to client
-        // PTY reading is blocking I/O, so we need to handle it carefully
-        let pty_task = tokio::spawn(async move {
+        // IMPORTANT: PTY reading is BLOCKING I/O - must use spawn_blocking, not spawn!
+        let pty_task = tokio::task::spawn_blocking(move || {
             tracing::info!(session_id = %session_id_clone, "PTY read task started");
             loop {
                 tracing::debug!(session_id = %session_id_clone, "PTY task: waiting for data...");
-                // Spawn blocking read operation
-                let read_result = {
-                    let mut buf = [0u8; 8192];
-                    // Note: reader.read() is blocking, but we're in spawn so it's OK
-                    match reader.read(&mut buf) {
-                        Ok(0) => {
-                            // Bash exited
-                            tracing::info!(session_id = %session_id_clone, "Bash exited");
-                            let envelope = crate::MessageEnvelope {
-                                session_id: session_id_clone.clone(),
-                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
-                                    message: "Session ended: bash exited".to_string(),
-                                }),
-                            };
-                            let _ = outgoing_clone.send(envelope);
-                            break;
-                        }
-                        Ok(n) => {
-                            tracing::debug!(session_id = %session_id_clone, bytes = n, "Read from PTY");
-                            Some(buf[..n].to_vec())
-                        }
-                        Err(e) => {
-                            tracing::error!(session_id = %session_id_clone, error = %e, "PTY read error");
-                            None
-                        }
-                    }
-                };
+                let mut buf = [0u8; 8192];
 
-                match read_result {
-                    Some(data) => {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        // Bash exited
+                        tracing::info!(session_id = %session_id_clone, "Bash exited");
+                        let envelope = crate::MessageEnvelope {
+                            session_id: session_id_clone.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: "Session ended: bash exited".to_string(),
+                            }),
+                        };
+                        let _ = outgoing_clone.send(envelope);
+                        break;
+                    }
+                    Ok(n) => {
+                        tracing::debug!(session_id = %session_id_clone, bytes = n, "Read from PTY");
                         let envelope = crate::MessageEnvelope {
                             session_id: session_id_clone.clone(),
                             payload: crate::MessagePayload::Server(crate::ServerMessage::Output {
-                                data,
+                                data: buf[..n].to_vec(),
                             }),
                         };
                         if outgoing_clone.send(envelope).is_err() {
@@ -857,7 +844,10 @@ impl KerrServer {
                             break;
                         }
                     }
-                    None => break,
+                    Err(e) => {
+                        tracing::error!(session_id = %session_id_clone, error = %e, "PTY read error");
+                        break;
+                    }
                 }
             }
             tracing::info!(session_id = %session_id_clone, "PTY task ended");
