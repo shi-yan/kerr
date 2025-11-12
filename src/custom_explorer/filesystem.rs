@@ -152,6 +152,7 @@ pub struct RemoteFilesystem {
     root_path: PathBuf,
     send: Arc<tokio::sync::Mutex<iroh::endpoint::SendStream>>,
     recv: Arc<tokio::sync::Mutex<iroh::endpoint::RecvStream>>,
+    session_id: String,
     error_callback: Arc<std::sync::Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>,
 }
 
@@ -161,10 +162,20 @@ impl RemoteFilesystem {
         send: iroh::endpoint::SendStream,
         recv: iroh::endpoint::RecvStream,
     ) -> Self {
+        Self::new_with_session_id(root_path, send, recv, "browser_1".to_string())
+    }
+
+    pub fn new_with_session_id(
+        root_path: PathBuf,
+        send: iroh::endpoint::SendStream,
+        recv: iroh::endpoint::RecvStream,
+        session_id: String,
+    ) -> Self {
         Self {
             root_path,
             send: Arc::new(tokio::sync::Mutex::new(send)),
             recv: Arc::new(tokio::sync::Mutex::new(recv)),
+            session_id,
             error_callback: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -179,39 +190,33 @@ impl RemoteFilesystem {
     }
 
     async fn send_request(&self, msg: crate::ClientMessage) -> io::Result<crate::ServerMessage> {
-        let config = bincode::config::standard();
+        // Wrap in envelope with session_id
+        let envelope = crate::MessageEnvelope {
+            session_id: self.session_id.clone(),
+            payload: crate::MessagePayload::Client(msg),
+        };
 
-        // Serialize and send request
-        let encoded = bincode::encode_to_vec(&msg, config)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        let len = (encoded.len() as u32).to_be_bytes();
-
-        let mut send: tokio::sync::MutexGuard<iroh::endpoint::SendStream> = self.send.lock().await;
-        send.write_all(&len).await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        send.write_all(&encoded).await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // Send envelope
+        let mut send = self.send.lock().await;
+        crate::send_envelope(&mut *send, &envelope)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         drop(send);
 
-        // Read response
-        let mut recv: tokio::sync::MutexGuard<iroh::endpoint::RecvStream> = self.recv.lock().await;
-
-        let mut len_bytes = [0u8; 4];
-        recv.read_exact(&mut len_bytes).await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let msg_len = u32::from_be_bytes(len_bytes) as usize;
-
-        let mut msg_bytes = vec![0u8; msg_len];
-        recv.read_exact(&mut msg_bytes).await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // Receive response envelope
+        let mut recv = self.recv.lock().await;
+        let response_envelope = crate::recv_envelope(&mut *recv)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         drop(recv);
 
-        // Deserialize response
-        let (response, _): (crate::ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        Ok(response)
+        // Extract server message from envelope
+        match response_envelope.payload {
+            crate::MessagePayload::Server(server_msg) => Ok(server_msg),
+            crate::MessagePayload::Client(_) => {
+                Err(io::Error::new(io::ErrorKind::Other, "Received client message instead of server message"))
+            }
+        }
     }
 }
 

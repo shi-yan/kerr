@@ -28,6 +28,25 @@ pub enum SessionType {
     Ping,
 }
 
+/// Message envelope for multiplexing multiple sessions over a single stream
+/// Each message includes a session_id to route it to the correct handler
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct MessageEnvelope {
+    /// Unique identifier for this session (e.g., "shell_1", "browser_1")
+    pub session_id: String,
+    /// The actual message payload
+    pub payload: MessagePayload,
+}
+
+/// Wrapper for client/server messages to enable bidirectional multiplexing
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum MessagePayload {
+    /// Message from client to server
+    Client(ClientMessage),
+    /// Message from server to client
+    Server(ServerMessage),
+}
+
 /// Messages sent from client to server
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum ClientMessage {
@@ -147,4 +166,44 @@ pub fn decode_connection_string(connection_string: &str) -> Result<iroh::Endpoin
     // Parse JSON
     let addr: iroh::EndpointAddr = serde_json::from_str(&addr_json)?;
     Ok(addr)
+}
+
+/// Helper to send an enveloped message over a QUIC stream
+/// Format: 4-byte length prefix + bincode-encoded MessageEnvelope
+pub async fn send_envelope(
+    send: &mut iroh::endpoint::SendStream,
+    envelope: &MessageEnvelope,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(envelope, config)?;
+    let len = (encoded.len() as u32).to_be_bytes();
+
+    send.write_all(&len).await?;
+    send.write_all(&encoded).await?;
+
+    Ok(())
+}
+
+/// Helper to receive an enveloped message from a QUIC stream
+/// Format: 4-byte length prefix + bincode-encoded MessageEnvelope
+pub async fn recv_envelope(
+    recv: &mut iroh::endpoint::RecvStream,
+) -> Result<MessageEnvelope, Box<dyn std::error::Error>> {
+    use tokio::io::AsyncReadExt;
+
+    let config = bincode::config::standard();
+
+    // Read length prefix
+    let mut len_bytes = [0u8; 4];
+    recv.read_exact(&mut len_bytes).await?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+
+    // Read message body
+    let mut msg_bytes = vec![0u8; len];
+    recv.read_exact(&mut msg_bytes).await?;
+
+    // Decode envelope
+    let (envelope, _): (MessageEnvelope, _) = bincode::decode_from_slice(&msg_bytes, config)?;
+
+    Ok(envelope)
 }
