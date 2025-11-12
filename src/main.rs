@@ -94,15 +94,21 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Serve { register, session, log } => {
             // Initialize logging if log file is specified
-            if let Some(log_file) = &log {
-                if let Err(e) = kerr::logging::init_server_logging(log_file) {
-                    eprintln!("Failed to initialize logging: {}", e);
-                    eprintln!("Continuing without file logging...");
-                    kerr::logging::init_console_logging();
+            // IMPORTANT: Keep _guard alive for the entire server lifetime
+            let _guard = if let Some(log_file) = &log {
+                match kerr::logging::init_server_logging(log_file) {
+                    Ok(guard) => Some(guard),
+                    Err(e) => {
+                        eprintln!("Failed to initialize logging: {}", e);
+                        eprintln!("Continuing without file logging...");
+                        kerr::logging::init_console_logging();
+                        None
+                    }
                 }
             } else {
                 kerr::logging::init_console_logging();
-            }
+                None
+            };
 
             kerr::server::run_server(register, session).await?;
         }

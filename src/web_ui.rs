@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use futures::{sink::SinkExt, stream::StreamExt};
+use futures::{sink::SinkExt, stream::StreamExt, FutureExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -28,6 +28,7 @@ struct AppState {
     remote_fs: Arc<Mutex<Option<Arc<RemoteFilesystem>>>>,
     endpoint: Arc<iroh::endpoint::Endpoint>,
     node_addr: Arc<Mutex<Option<iroh::EndpointAddr>>>,
+    connection: Arc<Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
     connection_string: Arc<Mutex<Option<String>>>,
     connection_alias: Arc<Mutex<Option<String>>>,
 }
@@ -38,16 +39,16 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
     let endpoint = iroh::endpoint::Endpoint::bind().await?;
 
     // If connection string is provided, connect immediately
-    let (node_addr, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
+    let (node_addr, connection, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {
         println!("Connecting to remote host...");
         let addr = crate::decode_connection_string(&conn_str)
             .map_err(|e| anyhow::anyhow!("Failed to decode connection string: {}", e))?;
-        let (_conn, fs) = connect_to_remote(&endpoint, &addr).await?;
+        let (conn, fs) = connect_to_remote(&endpoint, &addr).await?;
         println!("Connected! Setting up file browser session...");
-        (Some(addr), Some(Arc::new(fs)), Some(conn_str), None)
+        (Some(addr), Some(Arc::new(conn)), Some(Arc::new(fs)), Some(conn_str), None)
     } else {
         println!("Starting UI in connection selection mode...");
-        (None, None, None, None)
+        (None, None, None, None, None)
     };
 
     // Create application state
@@ -55,6 +56,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         remote_fs: Arc::new(Mutex::new(remote_fs)),
         endpoint: Arc::new(endpoint),
         node_addr: Arc::new(Mutex::new(node_addr)),
+        connection: Arc::new(Mutex::new(connection)),
         connection_string: Arc::new(Mutex::new(conn_str_stored)),
         connection_alias: Arc::new(Mutex::new(conn_alias)),
     });
@@ -87,37 +89,41 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Connect to a remote host
+/// Connect to a remote host using single-stream multiplexing
 async fn connect_to_remote(
     endpoint: &iroh::endpoint::Endpoint,
     addr: &iroh::EndpointAddr,
 ) -> Result<(iroh::endpoint::Connection, RemoteFilesystem)> {
-    eprintln!("[CONNECT] Connecting to remote host...");
+    eprintln!("[CONNECT] Connecting to remote host (single-stream mode)...");
     // Connect to the remote host
     let conn = endpoint.connect(addr.clone(), crate::ALPN).await?;
     eprintln!("[CONNECT] Connection established!");
 
-    eprintln!("[CONNECT] Opening bidirectional stream...");
-    // Open bidirectional stream for file browser session
+    eprintln!("[CONNECT] Opening single bidirectional stream for multiplexing...");
+    // Open ONE bidirectional stream that will handle all sessions
     let (mut send, recv) = conn.open_bi().await?;
     eprintln!("[CONNECT] Bidirectional stream opened!");
 
-    // Send Hello message with FileBrowser session type
-    eprintln!("[CONNECT] Sending Hello message with FileBrowser session type...");
-    let hello_msg = crate::ClientMessage::Hello {
-        session_type: crate::SessionType::FileBrowser,
+    // Send Hello envelope for FileBrowser session
+    eprintln!("[CONNECT] Sending Hello envelope for FileBrowser session...");
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: "browser_1".to_string(),
+        payload: crate::MessagePayload::Client(crate::ClientMessage::Hello {
+            session_type: crate::SessionType::FileBrowser,
+        }),
     };
-    let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())?;
+    crate::send_envelope(&mut send, &hello_envelope).await
+        .map_err(|e| anyhow::anyhow!("Failed to send Hello envelope: {}", e))?;
+    eprintln!("[CONNECT] Hello envelope sent!");
 
-    // Send length prefix (4 bytes) then the message
-    let len = (hello_data.len() as u32).to_be_bytes();
-    send.write_all(&len).await?;
-    send.write_all(&hello_data).await?;
-    eprintln!("[CONNECT] Hello message sent!");
-
-    // Create remote filesystem
-    eprintln!("[CONNECT] Creating RemoteFilesystem...");
-    let remote_fs = RemoteFilesystem::new(PathBuf::from("/"), send, recv);
+    // Create remote filesystem with session_id
+    eprintln!("[CONNECT] Creating RemoteFilesystem with multiplexed stream...");
+    let remote_fs = RemoteFilesystem::new_with_session_id(
+        PathBuf::from("/"),
+        send,
+        recv,
+        "browser_1".to_string(),
+    );
     eprintln!("[CONNECT] RemoteFilesystem created successfully!");
 
     Ok((conn, remote_fs))
@@ -234,11 +240,15 @@ async fn connect_to_connection(
 
     // Try to connect
     match connect_to_remote(&state.endpoint, &addr).await {
-        Ok((_conn, remote_fs)) => {
+        Ok((conn, remote_fs)) => {
             // Update state
             {
                 let mut state_addr = state.node_addr.lock().await;
                 *state_addr = Some(addr);
+            }
+            {
+                let mut state_conn = state.connection.lock().await;
+                *state_conn = Some(Arc::new(conn));
             }
             {
                 let mut state_fs = state.remote_fs.lock().await;
@@ -275,6 +285,10 @@ async fn disconnect_connection(
         *state_fs = None;
     }
     {
+        let mut state_conn = state.connection.lock().await;
+        *state_conn = None;
+    }
+    {
         let mut state_addr = state.node_addr.lock().await;
         *state_addr = None;
     }
@@ -298,7 +312,14 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_shell_socket(socket, state))
+    eprintln!("[WEBSOCKET] WebSocket upgrade request received for /ws/shell");
+    tracing::info!("WebSocket upgrade request received for /ws/shell");
+    ws.on_upgrade(move |socket| async move {
+        eprintln!("[WEBSOCKET] WebSocket upgraded, about to call handle_shell_socket");
+        tracing::info!("WebSocket upgraded successfully, calling handle_shell_socket");
+        handle_shell_socket(socket, state).await;
+        eprintln!("[WEBSOCKET] handle_shell_socket returned");
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -312,81 +333,71 @@ enum TerminalMessage {
 
 /// Handle shell WebSocket connection
 async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
+    eprintln!("[HANDLE_SHELL_SOCKET] Function entered!");
+
     // Create a session ID for logging
     let session_id = format!("ws_{}", std::process::id());
     let session_id_short = &session_id[..std::cmp::min(8, session_id.len())];
 
-    debug_log::log_ws_connection_start(session_id_short);
+    eprintln!("[HANDLE_SHELL_SOCKET] Session ID created: {}", session_id_short);
 
-    // Get the node address
-    let addr = {
-        let addr_lock = state.node_addr.lock().await;
-        match addr_lock.as_ref() {
-            Some(a) => a.clone(),
+    // Log session start with clear separator
+    debug_log::log_new_session_separator(session_id_short, "WebSocket Shell");
+
+    debug_log::log_ws_connection_start(session_id_short);
+    tracing::info!(session_id = session_id_short, "WebSocket shell connection started");
+
+    // Reuse the existing QUIC connection instead of creating a new one
+    // This allows multiple sessions (FileBrowser + Shell) over a single connection
+    let conn = {
+        let conn_lock = state.connection.lock().await;
+        match conn_lock.as_ref() {
+            Some(c) => {
+                tracing::info!(session_id = session_id_short, "Reusing existing QUIC connection for shell session");
+                debug_log::log_debug(session_id_short, "Reusing existing QUIC connection (Arc::clone)");
+                Arc::clone(c)  // Clone the Arc, NOT the Connection!
+            },
             None => {
-                eprintln!("No connection available");
+                eprintln!("[WEBSOCKET] No connection available");
+                tracing::error!(session_id = session_id_short, "No QUIC connection available");
                 debug_log::log_debug(session_id_short, "ERROR: No connection available");
                 return;
             }
         }
     };
 
-    // Create a NEW connection for the shell session
-    // (Each session type needs its own connection due to server architecture)
-    debug_log::log_debug(session_id_short, &format!("Connecting to: {:?}", addr));
-    let conn = match state.endpoint.connect(addr.clone(), crate::ALPN).await {
-        Ok(c) => {
-            debug_log::log_connection_accepted(session_id_short, &format!("{:?}", addr));
-            c
-        },
-        Err(e) => {
-            eprintln!("Failed to connect for shell session: {}", e);
-            debug_log::log_debug(session_id_short, &format!("ERROR: Connection failed: {}", e));
-            return;
-        }
-    };
-
-    // Open bidirectional stream for shell session
-    debug_log::log_debug(session_id_short, "Opening bidirectional stream");
+    // Note: With single-stream architecture, we should reuse the existing stream
+    // For now, we'll open a new stream - full multiplexing needs more refactoring
+    tracing::debug!(session_id = session_id_short, "Opening stream for shell session (TEMPORARY - needs full mux refactor)");
     let (mut send, recv) = match conn.open_bi().await {
         Ok(streams) => {
+            tracing::info!(session_id = session_id_short, "Bidirectional stream opened successfully for shell");
             debug_log::log_bi_stream_accepted(session_id_short);
             streams
         },
         Err(e) => {
-            eprintln!("Failed to open shell stream: {}", e);
+            eprintln!("[WEBSOCKET] Failed to open shell stream: {}", e);
+            tracing::error!(session_id = session_id_short, error = %e, "Failed to open bidirectional stream");
             debug_log::log_debug(session_id_short, &format!("ERROR: Failed to open bi stream: {}", e));
             return;
         }
     };
 
-    // Send Hello message with Shell session type
-    debug_log::log_debug(session_id_short, "Sending Hello message with Shell session type");
-    let hello_msg = crate::ClientMessage::Hello {
-        session_type: crate::SessionType::Shell,
-    };
-    let hello_data = match bincode::encode_to_vec(&hello_msg, bincode::config::standard()) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("Failed to encode hello message: {}", e);
-            debug_log::log_debug(session_id_short, &format!("ERROR: Failed to encode Hello: {}", e));
-            return;
-        }
+    // Send Hello envelope with Shell session type
+    debug_log::log_debug(session_id_short, "Sending Hello envelope for Shell session");
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: format!("shell_{}", std::process::id()),
+        payload: crate::MessagePayload::Client(crate::ClientMessage::Hello {
+            session_type: crate::SessionType::Shell,
+        }),
     };
 
-    // Send length prefix (4 bytes) then the message
-    let len = (hello_data.len() as u32).to_be_bytes();
-    if let Err(e) = send.write_all(&len).await {
-        eprintln!("Failed to send hello message length: {}", e);
-        debug_log::log_debug(session_id_short, &format!("ERROR: Failed to send Hello length: {}", e));
+    if let Err(e) = crate::send_envelope(&mut send, &hello_envelope).await {
+        eprintln!("Failed to send hello envelope: {}", e);
+        debug_log::log_debug(session_id_short, &format!("ERROR: Failed to send Hello envelope: {}", e));
         return;
     }
-    if let Err(e) = send.write_all(&hello_data).await {
-        eprintln!("Failed to send hello message: {}", e);
-        debug_log::log_debug(session_id_short, &format!("ERROR: Failed to send Hello data: {}", e));
-        return;
-    }
-    debug_log::log_debug(session_id_short, &format!("Hello message sent: {} bytes", hello_data.len()));
+    debug_log::log_debug(session_id_short, "Hello envelope sent");
 
     let send = Arc::new(Mutex::new(send));
     let recv = Arc::new(Mutex::new(recv));
@@ -401,70 +412,58 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
     let recv_clone = recv.clone();
     let shell_to_ws = tokio::spawn(async move {
         debug_log::log_quic_to_ws_task_started(&session_id_shell_to_ws);
-        let mut recv = recv_clone.lock().await;
+        let mut recv_guard = recv_clone.lock().await;
         let mut msg_count = 0;
         loop {
-            // Read length prefix (4 bytes)
+            // Receive envelope
             debug_log::log_quic_read_start(&session_id_shell_to_ws);
-            let mut len_bytes = [0u8; 4];
-            match recv.read_exact(&mut len_bytes).await {
-                Ok(()) => {},
+            let envelope = match crate::recv_envelope(&mut *recv_guard).await {
+                Ok(env) => {
+                    debug_log::log_quic_read_done(&session_id_shell_to_ws, 0);
+                    env
+                },
                 Err(e) => {
-                    eprintln!("[WS->SHELL] Failed to read message length: {}", e);
+                    eprintln!("[WS->SHELL] Failed to receive envelope: {}", e);
                     debug_log::log_quic_read_failed(&session_id_shell_to_ws, &e.to_string());
                     break;
                 }
-            }
-            let len = u32::from_be_bytes(len_bytes) as usize;
-            eprintln!("[WS->SHELL] Reading message of length: {}", len);
-            debug_log::log_quic_read_done(&session_id_shell_to_ws, len);
+            };
 
-            // Read message data
-            let mut msg_bytes = vec![0u8; len];
-            match recv.read_exact(&mut msg_bytes).await {
-                Ok(()) => {},
-                Err(e) => {
-                    eprintln!("[WS->SHELL] Failed to read message data: {}", e);
-                    break;
+            // Extract server message from envelope
+            let msg = match envelope.payload {
+                crate::MessagePayload::Server(server_msg) => server_msg,
+                _ => {
+                    eprintln!("[WS->SHELL] Received non-server message");
+                    continue;
                 }
-            }
+            };
 
-            // Decode as ServerMessage
-            debug_log::log_decode_start(&session_id_shell_to_ws, msg_bytes.len());
-            if let Ok((msg, _)) = bincode::decode_from_slice::<crate::ServerMessage, _>(
-                &msg_bytes,
-                bincode::config::standard()
-            ) {
-                debug_log::log_decode_done(&session_id_shell_to_ws, "ServerMessage");
-                eprintln!("[WS->SHELL] Decoded message successfully");
-                msg_count += 1;
-                match msg {
-                    crate::ServerMessage::Output { data } => {
-                        // Convert bytes to string for WebSocket
-                        let text = String::from_utf8_lossy(&data).to_string();
-                        eprintln!("[WS->SHELL] Sending output to WebSocket: {} bytes", text.len());
-                        debug_log::log_ws_msg_sent(&session_id_shell_to_ws, text.len());
-                        if let Err(e) = ws_sender.send(Message::Text(text.into())).await {
-                            eprintln!("[WS->SHELL] Failed to send to WebSocket: {}", e);
-                            debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS send failed: {}", e));
-                            break;
-                        }
+            debug_log::log_decode_done(&session_id_shell_to_ws, "ServerMessage");
+            eprintln!("[WS->SHELL] Decoded envelope successfully");
+            msg_count += 1;
+            match msg {
+                crate::ServerMessage::Output { data } => {
+                    // Convert bytes to string for WebSocket
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    eprintln!("[WS->SHELL] Sending output to WebSocket: {} bytes", text.len());
+                    debug_log::log_ws_msg_sent(&session_id_shell_to_ws, text.len());
+                    if let Err(e) = ws_sender.send(Message::Text(text.into())).await {
+                        eprintln!("[WS->SHELL] Failed to send to WebSocket: {}", e);
+                        debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS send failed: {}", e));
+                        break;
                     }
-                    crate::ServerMessage::Error { message } => {
-                        let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
-                        eprintln!("[WS->SHELL] Sending error to WebSocket: {}", message);
-                        debug_log::log_debug(&session_id_shell_to_ws, &format!("Sending error to WS: {}", message));
-                        if let Err(e) = ws_sender.send(Message::Text(error_msg.into())).await {
-                            eprintln!("[WS->SHELL] Failed to send error to WebSocket: {}", e);
-                            debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS error send failed: {}", e));
-                            break;
-                        }
-                    }
-                    _ => {}
                 }
-            } else {
-                eprintln!("[WS->SHELL] Failed to decode message");
-                debug_log::log_decode_failed(&session_id_shell_to_ws, "ServerMessage decode failed");
+                crate::ServerMessage::Error { message } => {
+                    let error_msg = format!("\r\n\x1b[31mError: {}\x1b[0m\r\n", message);
+                    eprintln!("[WS->SHELL] Sending error to WebSocket: {}", message);
+                    debug_log::log_debug(&session_id_shell_to_ws, &format!("Sending error to WS: {}", message));
+                    if let Err(e) = ws_sender.send(Message::Text(error_msg.into())).await {
+                        eprintln!("[WS->SHELL] Failed to send error to WebSocket: {}", e);
+                        debug_log::log_debug(&session_id_shell_to_ws, &format!("ERROR: WS error send failed: {}", e));
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
         debug_log::log_quic_to_ws_task_ended(&session_id_shell_to_ws, &format!("processed {} messages", msg_count));
@@ -485,52 +484,44 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
                         TerminalMessage::Input { data } => {
                             eprintln!("[SHELL->WS] Terminal input: {} bytes", data.len());
                             debug_log::log_debug(&session_id_ws_to_shell, &format!("Terminal input: {} bytes", data.len()));
-                            let client_msg = crate::ClientMessage::KeyEvent {
-                                data: data.into_bytes(),
+
+                            let envelope = crate::MessageEnvelope {
+                                session_id: format!("shell_{}", std::process::id()),
+                                payload: crate::MessagePayload::Client(crate::ClientMessage::KeyEvent {
+                                    data: data.into_bytes(),
+                                }),
                             };
-                            if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
-                                // Send length prefix (4 bytes) then message
-                                let len = (msg_data.len() as u32).to_be_bytes();
-                                let mut send = send.lock().await;
-                                debug_log::log_quic_write_start(&session_id_ws_to_shell, msg_data.len() + 4);
-                                if let Err(e) = send.write_all(&len).await {
-                                    eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
-                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, 4, &e.to_string());
-                                    break;
-                                }
-                                if let Err(e) = send.write_all(&msg_data).await {
-                                    eprintln!("[SHELL->WS] Failed to send message: {}", e);
-                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, msg_data.len(), &e.to_string());
-                                    break;
-                                }
-                                debug_log::log_quic_write_done(&session_id_ws_to_shell, msg_data.len() + 4);
-                                eprintln!("[SHELL->WS] Sent KeyEvent message");
-                                msg_count += 1;
+
+                            let mut send_guard = send.lock().await;
+                            debug_log::log_quic_write_start(&session_id_ws_to_shell, 0);
+                            if let Err(e) = crate::send_envelope(&mut *send_guard, &envelope).await {
+                                eprintln!("[SHELL->WS] Failed to send envelope: {}", e);
+                                debug_log::log_quic_write_failed(&session_id_ws_to_shell, 0, &e.to_string());
+                                break;
                             }
+                            debug_log::log_quic_write_done(&session_id_ws_to_shell, 0);
+                            eprintln!("[SHELL->WS] Sent KeyEvent envelope");
+                            msg_count += 1;
                         }
                         TerminalMessage::Resize { cols, rows } => {
                             eprintln!("[SHELL->WS] Terminal resize: {}x{}", cols, rows);
                             debug_log::log_debug(&session_id_ws_to_shell, &format!("Terminal resize: {}x{}", cols, rows));
-                            let client_msg = crate::ClientMessage::Resize { cols, rows };
-                            if let Ok(msg_data) = bincode::encode_to_vec(&client_msg, bincode::config::standard()) {
-                                // Send length prefix (4 bytes) then message
-                                let len = (msg_data.len() as u32).to_be_bytes();
-                                let mut send = send.lock().await;
-                                debug_log::log_quic_write_start(&session_id_ws_to_shell, msg_data.len() + 4);
-                                if let Err(e) = send.write_all(&len).await {
-                                    eprintln!("[SHELL->WS] Failed to send length prefix: {}", e);
-                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, 4, &e.to_string());
-                                    break;
-                                }
-                                if let Err(e) = send.write_all(&msg_data).await {
-                                    eprintln!("[SHELL->WS] Failed to send message: {}", e);
-                                    debug_log::log_quic_write_failed(&session_id_ws_to_shell, msg_data.len(), &e.to_string());
-                                    break;
-                                }
-                                debug_log::log_quic_write_done(&session_id_ws_to_shell, msg_data.len() + 4);
-                                eprintln!("[SHELL->WS] Sent Resize message");
-                                msg_count += 1;
+
+                            let envelope = crate::MessageEnvelope {
+                                session_id: format!("shell_{}", std::process::id()),
+                                payload: crate::MessagePayload::Client(crate::ClientMessage::Resize { cols, rows }),
+                            };
+
+                            let mut send_guard = send.lock().await;
+                            debug_log::log_quic_write_start(&session_id_ws_to_shell, 0);
+                            if let Err(e) = crate::send_envelope(&mut *send_guard, &envelope).await {
+                                eprintln!("[SHELL->WS] Failed to send envelope: {}", e);
+                                debug_log::log_quic_write_failed(&session_id_ws_to_shell, 0, &e.to_string());
+                                break;
                             }
+                            debug_log::log_quic_write_done(&session_id_ws_to_shell, 0);
+                            eprintln!("[SHELL->WS] Sent Resize envelope");
+                            msg_count += 1;
                         }
                     }
                 } else {
@@ -540,16 +531,15 @@ async fn handle_shell_socket(socket: WebSocket, state: Arc<AppState>) {
             }
         }
 
-        // Send disconnect message
-        eprintln!("[SHELL->WS] Sending disconnect message");
+        // Send disconnect envelope
+        eprintln!("[SHELL->WS] Sending disconnect envelope");
         debug_log::log_debug(&session_id_ws_to_shell, "Sending disconnect message");
-        let disconnect_msg = crate::ClientMessage::Disconnect;
-        if let Ok(msg_data) = bincode::encode_to_vec(&disconnect_msg, bincode::config::standard()) {
-            let len = (msg_data.len() as u32).to_be_bytes();
-            let mut send = send.lock().await;
-            let _ = send.write_all(&len).await;
-            let _ = send.write_all(&msg_data).await;
-        }
+        let disconnect_envelope = crate::MessageEnvelope {
+            session_id: format!("shell_{}", std::process::id()),
+            payload: crate::MessagePayload::Client(crate::ClientMessage::Disconnect),
+        };
+        let mut send_guard = send.lock().await;
+        let _ = crate::send_envelope(&mut *send_guard, &disconnect_envelope).await;
         debug_log::log_ws_to_quic_task_ended(&session_id_ws_to_shell, &format!("sent {} messages", msg_count));
         eprintln!("[SHELL->WS] ws_to_shell task ended");
     });
