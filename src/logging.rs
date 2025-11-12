@@ -15,7 +15,9 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// - User information (username)
 /// - Append mode (doesn't overwrite existing logs)
 /// - Structured log format
-pub fn init_server_logging<P: AsRef<Path>>(log_file: P) -> Result<()> {
+///
+/// Returns a guard that must be kept alive for the duration of the program
+pub fn init_server_logging<P: AsRef<Path>>(log_file: P) -> Result<tracing_appender::non_blocking::WorkerGuard> {
     let log_path = log_file.as_ref();
 
     // Get current user information
@@ -52,21 +54,24 @@ pub fn init_server_logging<P: AsRef<Path>>(log_file: P) -> Result<()> {
         .append(true)
         .open(log_path)?;
 
-    let file_writer = tracing_appender::non_blocking(file).0;
+    // IMPORTANT: Keep the guard alive! When it's dropped, logging stops.
+    let (file_writer, guard) = tracing_appender::non_blocking(file);
 
     // Set up the tracing subscriber with file output
     let file_layer = fmt::layer()
         .with_writer(file_writer)
         .with_ansi(false) // No ANSI colors in log file
         .with_target(true)
-        .with_thread_ids(true)
-        .with_line_number(true);
+        .with_thread_ids(false)
+        .with_line_number(false);
 
     // Also output to stderr for interactive use
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(true)
-        .with_target(false);
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_line_number(false);
 
     // Set up env filter (can be controlled via RUST_LOG env var)
     let env_filter = EnvFilter::try_from_default_env()
@@ -85,7 +90,8 @@ pub fn init_server_logging<P: AsRef<Path>>(log_file: P) -> Result<()> {
         "Logging initialized"
     );
 
-    Ok(())
+    // Return the guard - caller MUST keep it alive!
+    Ok(guard)
 }
 
 /// Initialize console-only logging (for commands other than serve)
