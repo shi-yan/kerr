@@ -275,165 +275,163 @@ struct KerrServer;
 impl ProtocolHandler for KerrServer {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let node_id = connection.remote_id();
-        tracing::info!(node_id = %node_id, "Accepted connection - single stream multiplexing mode");
+        tracing::info!(node_id = %node_id, "Accepted connection - envelope-based multiplexing");
 
-        // Accept ONE bidirectional stream for the entire connection
-        // Multiple sessions (FileBrowser, Shell, etc.) will be multiplexed over this single stream
-        let (mut send, mut recv) = match connection.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                tracing::error!(node_id = %node_id, error = ?e, "Failed to accept stream");
-                return Ok(());
-            }
-        };
-
-        tracing::debug!(node_id = %node_id, "Bidirectional stream accepted");
-
-        // Create channels for each session type to communicate with the multiplexer
-        // session_id -> channel to send messages to that session
-        let sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<
-            String,
-            tokio::sync::mpsc::UnboundedSender<crate::ClientMessage>
-        >>> = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-        // Channel to collect outgoing messages from all sessions
-        let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<crate::MessageEnvelope>();
-
-        // Spawn task to send outgoing messages
-        let send_task = tokio::spawn(async move {
-            while let Some(envelope) = outgoing_rx.recv().await {
-                if let Err(e) = crate::send_envelope(&mut send, &envelope).await {
-                    tracing::error!("Failed to send envelope: {}", e);
-                    break;
-                }
-            }
-            tracing::debug!("Send task ended");
-        });
-
-        // Main message loop - read enveloped messages and route to sessions
-        let sessions_clone = sessions.clone();
-        let node_id_clone = node_id;
+        // Accept multiple bidirectional streams from the client
+        // Each stream uses envelopes for session identification
         loop {
-            let envelope = match crate::recv_envelope(&mut recv).await {
-                Ok(env) => env,
-                Err(e) => {
-                    tracing::info!(node_id = %node_id_clone, error = %e, "Connection closed or error receiving envelope");
+            let (mut send, mut recv) = match connection.accept_bi().await {
+                Ok(streams) => streams,
+                Err(_) => {
+                    tracing::info!(node_id = %node_id, "Connection closed");
                     break;
                 }
             };
 
-            let session_id = envelope.session_id.clone();
-            let session_id_short = if session_id.len() >= 8 { &session_id[..8] } else { &session_id };
+            let node_id_clone = node_id;
 
-            match envelope.payload {
-                crate::MessagePayload::Client(client_msg) => {
-                    // Check if this is a Hello message (creating new session)
-                    if let crate::ClientMessage::Hello { session_type } = &client_msg {
-                        debug_log::log_new_session_separator(session_id_short, &format!("{:?}", session_type));
-                        tracing::info!(node_id = %node_id_clone, session_id = %session_id, session_type = ?session_type, "Creating new session");
+            // Spawn handler for this stream
+            tokio::spawn(async move {
+                tracing::debug!(node_id = %node_id_clone, "New stream accepted");
 
-                        // Create channel for this session
-                        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel();
+                // Create channels for sessions on this stream
+                let sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<
+                    String,
+                    tokio::sync::mpsc::UnboundedSender<crate::ClientMessage>
+                >>> = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
-                        // Store session channel
-                        sessions_clone.lock().await.insert(session_id.clone(), session_tx);
+                let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<crate::MessageEnvelope>();
 
-                        // Spawn session handler
-                        let outgoing_tx_clone = outgoing_tx.clone();
-                        let session_id_clone = session_id.clone();
-                        let sessions_for_cleanup = sessions_clone.clone();
+                // Spawn task to send outgoing messages
+                let send_task = tokio::spawn(async move {
+                    while let Some(envelope) = outgoing_rx.recv().await {
+                        if let Err(e) = crate::send_envelope(&mut send, &envelope).await {
+                            tracing::error!("Failed to send envelope: {}", e);
+                            break;
+                        }
+                    }
+                    tracing::debug!("Send task ended");
+                });
 
-                        match session_type {
-                            crate::SessionType::Shell => {
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_shell_session_mux(
-                                        node_id_clone,
-                                        session_id_clone.clone(),
-                                        session_rx,
-                                        outgoing_tx_clone,
-                                    ).await {
-                                        tracing::error!(session_id = %session_id_clone, error = ?e, "Shell session error");
+                // Main message loop for this stream
+                let sessions_clone = sessions.clone();
+                loop {
+                    let envelope = match crate::recv_envelope(&mut recv).await {
+                        Ok(env) => env,
+                        Err(e) => {
+                            tracing::info!(node_id = %node_id_clone, error = %e, "Stream closed or error");
+                            break;
+                        }
+                    };
+
+                    let session_id = envelope.session_id.clone();
+                    let session_id_short = if session_id.len() >= 8 { &session_id[..8] } else { &session_id };
+
+                    match envelope.payload {
+                        crate::MessagePayload::Client(client_msg) => {
+                            // Check if this is a Hello message
+                            if let crate::ClientMessage::Hello { session_type } = &client_msg {
+                                debug_log::log_new_session_separator(session_id_short, &format!("{:?}", session_type));
+                                tracing::info!(node_id = %node_id_clone, session_id = %session_id, session_type = ?session_type, "Creating new session");
+
+                                let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel();
+                                sessions_clone.lock().await.insert(session_id.clone(), session_tx);
+
+                                let outgoing_tx_clone = outgoing_tx.clone();
+                                let session_id_clone = session_id.clone();
+                                let sessions_for_cleanup = sessions_clone.clone();
+
+                                match session_type {
+                                    crate::SessionType::Shell => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_shell_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "Shell session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
                                     }
-                                    // Clean up session on exit
-                                    sessions_for_cleanup.lock().await.remove(&session_id_clone);
-                                });
-                            }
-                            crate::SessionType::FileBrowser => {
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_file_browser_session_mux(
-                                        node_id_clone,
-                                        session_id_clone.clone(),
-                                        session_rx,
-                                        outgoing_tx_clone,
-                                    ).await {
-                                        tracing::error!(session_id = %session_id_clone, error = ?e, "FileBrowser session error");
+                                    crate::SessionType::FileBrowser => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_file_browser_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "FileBrowser session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
                                     }
-                                    sessions_for_cleanup.lock().await.remove(&session_id_clone);
-                                });
-                            }
-                            crate::SessionType::FileTransfer => {
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_file_transfer_session_mux(
-                                        node_id_clone,
-                                        session_id_clone.clone(),
-                                        session_rx,
-                                        outgoing_tx_clone,
-                                    ).await {
-                                        tracing::error!(session_id = %session_id_clone, error = ?e, "FileTransfer session error");
+                                    crate::SessionType::FileTransfer => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_file_transfer_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "FileTransfer session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
                                     }
-                                    sessions_for_cleanup.lock().await.remove(&session_id_clone);
-                                });
-                            }
-                            crate::SessionType::TcpRelay => {
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_tcp_relay_session_mux(
-                                        node_id_clone,
-                                        session_id_clone.clone(),
-                                        session_rx,
-                                        outgoing_tx_clone,
-                                    ).await {
-                                        tracing::error!(session_id = %session_id_clone, error = ?e, "TcpRelay session error");
+                                    crate::SessionType::TcpRelay => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_tcp_relay_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "TcpRelay session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
                                     }
-                                    sessions_for_cleanup.lock().await.remove(&session_id_clone);
-                                });
-                            }
-                            crate::SessionType::Ping => {
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_ping_session_mux(
-                                        node_id_clone,
-                                        session_id_clone.clone(),
-                                        session_rx,
-                                        outgoing_tx_clone,
-                                    ).await {
-                                        tracing::error!(session_id = %session_id_clone, error = ?e, "Ping session error");
+                                    crate::SessionType::Ping => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_ping_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "Ping session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
                                     }
-                                    sessions_for_cleanup.lock().await.remove(&session_id_clone);
-                                });
+                                }
+                            } else {
+                                // Route message to existing session
+                                let sessions_lock = sessions_clone.lock().await;
+                                if let Some(session_tx) = sessions_lock.get(&session_id) {
+                                    if session_tx.send(client_msg).is_err() {
+                                        tracing::warn!(session_id = %session_id, "Failed to send to session");
+                                    }
+                                } else {
+                                    tracing::warn!(session_id = %session_id, "Unknown session");
+                                }
                             }
                         }
-                    } else {
-                        // Route message to existing session
-                        let sessions_lock = sessions_clone.lock().await;
-                        if let Some(session_tx) = sessions_lock.get(&session_id) {
-                            if session_tx.send(client_msg).is_err() {
-                                tracing::warn!(session_id = %session_id, "Failed to send message to session (channel closed)");
-                            }
-                        } else {
-                            tracing::warn!(session_id = %session_id, "Received message for unknown session");
+                        crate::MessagePayload::Server(_) => {
+                            tracing::warn!(session_id = %session_id, "Server received Server message");
                         }
                     }
                 }
-                crate::MessagePayload::Server(_) => {
-                    tracing::warn!(session_id = %session_id, "Server received Server message (unexpected)");
-                }
-            }
+
+                drop(outgoing_tx);
+                let _ = send_task.await;
+                tracing::info!(node_id = %node_id_clone, "Stream handler exiting");
+            });
         }
 
-        // Clean up
-        drop(outgoing_tx);
-        let _ = send_task.await;
-
-        tracing::info!(node_id = %node_id, "Connection handler exiting");
         Ok(())
     }
 }
@@ -1467,36 +1465,60 @@ impl KerrServer {
                 crate::ClientMessage::FsReadDir { path } => {
                     tracing::debug!(session_id = %session_id, path = %path, "FsReadDir request");
 
-                    // Read directory and create response
+                    // Read directory and create response using FileEntry struct
                     match std::fs::read_dir(&path) {
                         Ok(entries) => {
-                            let mut file_list = Vec::new();
+                            use crate::custom_explorer::file_explorer::FileMetadata;
+                            use crate::custom_explorer::filesystem::FileEntry;
+
+                            let mut file_entries = Vec::new();
                             for entry_result in entries {
                                 if let Ok(entry) = entry_result {
+                                    let entry_path = entry.path();
                                     if let Ok(metadata) = entry.metadata() {
                                         let file_name = entry.file_name().to_string_lossy().to_string();
                                         let is_dir = metadata.is_dir();
+
+                                        #[cfg(unix)]
                                         let is_hidden = file_name.starts_with('.');
 
-                                        file_list.push(serde_json::json!({
-                                            "name": file_name,
-                                            "is_dir": is_dir,
-                                            "is_hidden": is_hidden,
-                                            "metadata": {
-                                                "size": metadata.len(),
-                                                "created": metadata.created().ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
-                                                "modified": metadata.modified().ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
-                                                "is_dir": is_dir,
-                                            }
-                                        }));
+                                        #[cfg(windows)]
+                                        let is_hidden = {
+                                            use std::os::windows::fs::MetadataExt;
+                                            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+                                            (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+                                        };
+
+                                        #[cfg(not(any(unix, windows)))]
+                                        let is_hidden = false;
+
+                                        let name = if is_dir {
+                                            format!("{}/", file_name)
+                                        } else {
+                                            file_name
+                                        };
+
+                                        file_entries.push(FileEntry {
+                                            name,
+                                            path: entry_path,
+                                            is_dir,
+                                            is_hidden,
+                                            metadata: Some(FileMetadata {
+                                                size: metadata.len(),
+                                                created: metadata.created().ok(),
+                                                modified: metadata.modified().ok(),
+                                                is_dir,
+                                            }),
+                                        });
                                     }
                                 }
                             }
 
+                            let entries_json = serde_json::to_string(&file_entries).unwrap_or_else(|_| "[]".to_string());
                             let response = crate::MessageEnvelope {
                                 session_id: session_id.clone(),
                                 payload: crate::MessagePayload::Server(crate::ServerMessage::FsDirListing {
-                                    entries_json: serde_json::to_string(&file_list).unwrap_or_else(|_| "[]".to_string()),
+                                    entries_json,
                                 }),
                             };
                             let _ = outgoing.send(response);
