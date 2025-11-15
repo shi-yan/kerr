@@ -28,6 +28,9 @@ enum Commands {
         /// Path to log file (logs will be appended with timestamps)
         #[arg(long)]
         log: Option<String>,
+        /// Automatically update without prompting if update is available
+        #[arg(long)]
+        update: bool,
     },
     /// Connect to a Kerr server
     Connect {
@@ -95,7 +98,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { register, session, log } => {
+        Commands::Serve { register, session, log, update } => {
             // Initialize logging if log file is specified
             // IMPORTANT: Keep _guard alive for the entire server lifetime
             let _guard = if let Some(log_file) = &log {
@@ -112,6 +115,29 @@ async fn main() -> Result<()> {
                 kerr::logging::init_console_logging();
                 None
             };
+
+            // Acquire instance lock to ensure single instance
+            let _instance_lock = match kerr::lock::InstanceLock::try_acquire() {
+                Ok(lock) => {
+                    tracing::info!("Instance lock acquired successfully");
+                    Some(lock)
+                }
+                Err(e) => {
+                    eprintln!("\n{}", e);
+                    eprintln!("\nIf you believe this is an error, you can manually remove the lock file:");
+                    if let Ok(lock_path) = kerr::lock::InstanceLock::get_path() {
+                        eprintln!("  {}", lock_path.display());
+                    }
+                    std::process::exit(1);
+                }
+            };
+
+            // Check for updates on startup (unless in debug mode)
+            if !kerr::update::is_debug_mode() {
+                if let Err(e) = check_and_prompt_for_update(update).await {
+                    tracing::warn!("Update check failed: {}", e);
+                }
+            }
 
             kerr::server::run_server(register, session).await?;
         }
@@ -181,6 +207,82 @@ async fn main() -> Result<()> {
             kerr::web_ui::run_web_ui(connection_string, port).await
                 .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
         }
+    }
+
+    Ok(())
+}
+
+/// Check for updates and prompt user (unless auto-update is enabled)
+async fn check_and_prompt_for_update(auto_update: bool) -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    // Load config
+    let config = match kerr::config::ServerConfig::load() {
+        Ok(c) => c,
+        Err(_) => {
+            // No config found, skip update check
+            tracing::debug!("No server config found, skipping update check");
+            return Ok(());
+        }
+    };
+
+    // Check for updates
+    tracing::info!("Checking for updates...");
+    let version_info = match kerr::update::check_for_updates(&config).await? {
+        Some(info) => info,
+        None => {
+            tracing::info!("No updates available (current version: {})", kerr::VERSION);
+            return Ok(());
+        }
+    };
+
+    let current_version = kerr::VERSION;
+    let new_version = &version_info.version;
+
+    println!("\n╔══════════════════════════════════════════════════════════════╗");
+    println!("║                  Update Available                            ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("  Current version: {}", current_version);
+    println!("  New version:     {}", new_version);
+    println!();
+
+    // If auto-update is enabled, proceed immediately
+    if auto_update {
+        println!("Auto-update enabled. Starting update...\n");
+        tracing::info!("Auto-update enabled, proceeding with update from {} to {}", current_version, new_version);
+
+        // Perform the update (this will exit the process if successful)
+        if let Err(e) = kerr::update::perform_update(&config).await {
+            eprintln!("Update failed: {}", e);
+            tracing::error!("Update failed: {}", e);
+            return Err(e);
+        }
+
+        return Ok(());
+    }
+
+    // Prompt user for confirmation
+    print!("Do you want to update now? [Y/n]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    if input.is_empty() || input == "y" || input == "yes" {
+        println!("\nStarting update...");
+        tracing::info!("User confirmed update from {} to {}", current_version, new_version);
+
+        // Perform the update (this will exit the process if successful)
+        if let Err(e) = kerr::update::perform_update(&config).await {
+            eprintln!("Update failed: {}", e);
+            tracing::error!("Update failed: {}", e);
+            return Err(e);
+        }
+    } else {
+        println!("\nUpdate skipped. You can update later by restarting with --update flag.");
+        tracing::info!("User declined update");
     }
 
     Ok(())

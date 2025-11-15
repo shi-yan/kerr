@@ -331,6 +331,40 @@ impl ProtocolHandler for KerrServer {
 
                     match envelope.payload {
                         crate::MessagePayload::Client(client_msg) => {
+                            // Check if this is a ServerUpdate message
+                            if let crate::ClientMessage::ServerUpdate { admin_hash } = &client_msg {
+                                tracing::info!(node_id = %node_id_clone, "Received server update request");
+
+                                // Handle update in a separate task to avoid blocking the main loop
+                                let admin_hash_clone = admin_hash.clone();
+                                let outgoing_tx_clone = outgoing_tx.clone();
+                                let session_id_clone = session_id.clone();
+
+                                tokio::spawn(async move {
+                                    let result = Self::handle_server_update(&admin_hash_clone).await;
+
+                                    let response = match result {
+                                        Ok(message) => crate::ServerMessage::UpdateResponse {
+                                            success: true,
+                                            message,
+                                        },
+                                        Err(e) => crate::ServerMessage::UpdateResponse {
+                                            success: false,
+                                            message: e.to_string(),
+                                        },
+                                    };
+
+                                    let envelope = crate::MessageEnvelope {
+                                        session_id: session_id_clone,
+                                        payload: crate::MessagePayload::Server(response),
+                                    };
+
+                                    let _ = outgoing_tx_clone.send(envelope);
+                                });
+
+                                continue;
+                            }
+
                             // Check if this is a Hello message
                             if let crate::ClientMessage::Hello { session_type } = &client_msg {
                                 debug_log::log_new_session_separator(session_id_short, &format!("{:?}", session_type));
@@ -2134,5 +2168,45 @@ impl KerrServer {
 
         tracing::info!(session_id = %session_id, "Ping session closed");
         Ok(())
+    }
+
+    /// Handle server update request
+    async fn handle_server_update(admin_hash: &str) -> Result<String, anyhow::Error> {
+        tracing::info!("Processing server update request");
+
+        // Load server config
+        let config = match crate::config::ServerConfig::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to load server config: {}", e);
+                anyhow::bail!("Server is not configured for auto-update. Config file not found or invalid.");
+            }
+        };
+
+        // Check if running in debug mode
+        if crate::update::is_debug_mode() {
+            tracing::warn!("Update requested but running in debug mode");
+            anyhow::bail!("Updates are disabled in debug mode (cargo run)");
+        }
+
+        // Verify admin password hash
+        if !config.verify_admin_hash(admin_hash) {
+            tracing::warn!("Server update failed: Invalid admin password hash");
+            anyhow::bail!("Invalid admin password");
+        }
+
+        tracing::info!("Admin password verified, proceeding with update");
+
+        // Perform the update (this will exit the process if successful)
+        match crate::update::perform_update(&config).await {
+            Ok(_) => {
+                // This should never be reached because perform_update exits the process
+                Ok("Update initiated successfully".to_string())
+            }
+            Err(e) => {
+                tracing::error!("Update failed: {}", e);
+                Err(e)
+            }
+        }
     }
 }

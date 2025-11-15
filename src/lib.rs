@@ -1,6 +1,9 @@
 use bincode::{Decode, Encode};
 use base64::Engine;
 
+/// Current version of Kerr (matches Cargo.toml version)
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod server;
 pub mod client;
 pub mod transfer;
@@ -12,6 +15,9 @@ pub mod traffic_ui;
 pub mod debug_log;
 pub mod web_ui;
 pub mod logging;
+pub mod config;
+pub mod update;
+pub mod lock;
 
 /// Session type for initial handshake
 #[derive(Debug, Clone, Encode, Decode)]
@@ -86,6 +92,8 @@ pub enum ClientMessage {
     TcpClose { stream_id: u32 },
     /// Ping request with payload
     PingRequest { data: Vec<u8> },
+    /// Request server update with admin password hash (blake3)
+    ServerUpdate { admin_hash: String },
 }
 
 /// Messages sent from server to client
@@ -127,6 +135,8 @@ pub enum ServerMessage {
     TcpCloseResponse { stream_id: u32, error: Option<String> },
     /// Ping response echoing back the payload
     PingResponse { data: Vec<u8> },
+    /// Server update response (success or error)
+    UpdateResponse { success: bool, message: String },
 }
 
 /// ALPN for the Kerr protocol
