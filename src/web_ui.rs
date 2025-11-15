@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use futures::{sink::SinkExt, stream::StreamExt, FutureExt};
+use futures::{sink::SinkExt, stream::StreamExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -46,7 +46,7 @@ struct AppState {
 }
 
 /// Run the web UI server
-pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
+pub async fn run_web_ui(connection_string: Option<String>, port: u16) -> Result<()> {
     // Create endpoint for future connections
     let endpoint = iroh::endpoint::Endpoint::bind().await?;
 
@@ -76,6 +76,9 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
 
     // Build our application router
     let app = Router::new()
+        .route("/api/auth/session", get(check_session))
+        .route("/api/auth/login", get(initiate_login))
+        .route("/api/auth/callback", get(handle_oauth_callback))
         .route("/api/connection/status", get(connection_status))
         .route("/api/connection/list", get(list_connections))
         .route("/api/connection/connect", post(connect_to_connection))
@@ -94,7 +97,7 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .with_state(state);
 
     // Start the server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("Web UI server running at http://{}", addr);
     println!("Open your browser to access the UI");
 
@@ -181,6 +184,128 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
                 .unwrap()
         }
     }
+}
+
+/// Check if user is logged in (has valid session)
+async fn check_session() -> Json<SessionCheckResponse> {
+    let has_session = crate::auth::load_session().is_ok();
+    Json(SessionCheckResponse {
+        logged_in: has_session,
+    })
+}
+
+#[derive(Serialize)]
+struct SessionCheckResponse {
+    logged_in: bool,
+}
+
+/// Initiate Google OAuth login by redirecting to Google
+async fn initiate_login(Query(params): Query<LoginParams>) -> Result<Response, (StatusCode, String)> {
+    use rand::Rng;
+
+    // Generate state token for CSRF protection
+    let mut rng = rand::rng();
+    let token: [u8; 32] = rng.random();
+    let state = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &token);
+
+    // Build redirect URI - use the port from the request
+    let port = params.port.unwrap_or(3000);
+    let redirect_uri = format!("http://127.0.0.1:{}/api/auth/callback", port);
+
+    // Build Google OAuth URL using url crate for proper encoding
+    let mut url = url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build URL: {}", e)))?;
+
+    let client_id = "402230363945-pmkrgrkkashlcdkf8oso0pptneioqn2o.apps.googleusercontent.com";
+    let scope = "email profile";
+
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("scope", scope)
+        .append_pair("state", &state);
+
+    let auth_url = url.to_string();
+
+    // Redirect to Google
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, auth_url)
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct LoginParams {
+    port: Option<u16>,
+}
+
+/// Handle OAuth callback from Google
+async fn handle_oauth_callback(Query(params): Query<CallbackParams>) -> Result<Response, (StatusCode, String)> {
+    // Extract auth code from query params
+    let auth_code = params.code.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing authorization code".to_string())
+    })?;
+
+    // Get port from state or default
+    let port = params.port.unwrap_or(3000);
+    let redirect_uri = format!("http://127.0.0.1:{}/api/auth/callback", port);
+
+    // Exchange code with backend server
+    let client = reqwest::Client::new();
+    let request_payload = serde_json::json!({
+        "code": auth_code,
+        "redirect_uri": redirect_uri,
+        "login_from": "web_ui",
+    });
+
+    let response = client
+        .post("https://0hepe5jz44.execute-api.us-west-2.amazonaws.com/default/login_with_code")
+        .json(&request_payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to contact auth server: {}", e)))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Auth server error: {}", error_text)));
+    }
+
+    let login_response: crate::auth::LoginResponse = response
+        .json()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse response: {}", e)))?;
+
+    // Save session to file
+    let config_dir = directories::ProjectDirs::from("app", "freewill", "kerr")
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get config dir".to_string()))?
+        .config_dir()
+        .to_path_buf();
+
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create config dir: {}", e)))?;
+
+    let session_file = config_dir.join("session.json");
+    let json_data = serde_json::to_string_pretty(&login_response)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize session: {}", e)))?;
+
+    std::fs::write(&session_file, json_data)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write session: {}", e)))?;
+
+    // Redirect back to home page
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/")
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+    port: Option<u16>,
 }
 
 /// Check connection status

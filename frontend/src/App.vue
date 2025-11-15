@@ -1,7 +1,12 @@
 <template>
   <div class="app">
-    <ConnectionSelector v-if="!connected" @connected="handleConnected" />
+    <!-- Show login if not logged in -->
+    <Login v-if="!loggedIn" />
 
+    <!-- Show connection selector if logged in but not connected -->
+    <ConnectionSelector v-else-if="!connected" @connected="handleConnected" />
+
+    <!-- Show main UI if logged in and connected -->
     <template v-else>
       <div class="container">
         <div class="terminal-panel" :style="{ width: fileBrowserVisible ? terminalWidth + 'px' : '100%' }">
@@ -20,15 +25,31 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
+import Login from './components/Login.vue';
 import ConnectionSelector from './components/ConnectionSelector.vue';
 import Terminal from './components/Terminal.vue';
 import FileBrowser from './components/FileBrowser.vue';
 
+const loggedIn = ref(false);
 const connected = ref(false);
 const connectionString = ref<string>('');
 const terminalWidth = ref(800); // Default width
 const isResizing = ref(false);
 const fileBrowserVisible = ref(true);
+
+const checkSessionStatus = async () => {
+  try {
+    const response = await fetch('/api/auth/session');
+    if (response.ok) {
+      const data = await response.json();
+      console.log('[App] Session status response:', data);
+      loggedIn.value = data.logged_in;
+    }
+  } catch (e) {
+    console.error('[App] Failed to check session status:', e);
+    loggedIn.value = false;
+  }
+};
 
 const checkConnectionStatus = async () => {
   try {
@@ -81,8 +102,14 @@ const stopResize = () => {
   isResizing.value = false;
 };
 
-onMounted(() => {
-  checkConnectionStatus();
+onMounted(async () => {
+  // Check session status first
+  await checkSessionStatus();
+
+  // Only check connection status if logged in
+  if (loggedIn.value) {
+    checkConnectionStatus();
+  }
 
   // Initialize terminal width to 60% of window width
   terminalWidth.value = Math.floor(window.innerWidth * 0.6);
