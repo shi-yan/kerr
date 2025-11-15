@@ -261,6 +261,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::PingResponse { .. } => {
                     // Ping response - not used in run_client (only for ping test)
                 }
+                ServerMessage::UpdateResponse { .. } => {
+                    // Update response - not used in run_client (server-only)
+                }
             }
         }
     });

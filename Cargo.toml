@@ -3,6 +3,16 @@ name = "kerr"
 version = "0.1.0"
 edition = "2024"
 
+# The main application binary
+[[bin]]
+name = "kerr"
+path = "src/main.rs"
+
+# The standalone updater binary
+[[bin]]
+name = "kerr-updater"
+path = "src/bin/updater.rs"
+
 [dependencies]
 iroh = "0.95.1"
 n0-snafu = "0.2.2"
@@ -45,6 +55,8 @@ mime_guess = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi", "json"] }
 tracing-appender = "0.2"
+fs2 = "0.4"
+zip = "2.2"
 
 [build-dependencies]
 which = "8.0"
