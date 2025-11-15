@@ -105,11 +105,9 @@ pub async fn run_server(register_alias: Option<String>, session_path: Option<Str
     println!("  Pull:    {} <remote> <local>", pull_command);
     println!("  Browse:  {}", browse_command);
     println!("  Relay:   {} <local_port> <remote_port>", relay_command);
-    println!("\n─────────────────────────────────────────────────────────────────");
-    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | Ctrl+C");
     println!("  Ping:    {}", ping_command);
     println!("\n─────────────────────────────────────────────────────────────────");
-    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | p[i]ng | Ctrl+C");
+    println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | p[i]ng | Ctrl+C");
     println!("─────────────────────────────────────────────────────────────────\n");
 
     // Enable raw mode for keyboard event handling
