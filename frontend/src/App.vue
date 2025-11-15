@@ -4,13 +4,13 @@
 
     <template v-else>
       <div class="container">
-        <div class="terminal-panel" :style="{ width: terminalWidth + 'px' }">
-          <Terminal />
+        <div class="terminal-panel" :style="{ width: fileBrowserVisible ? terminalWidth + 'px' : '100%' }">
+          <Terminal @toggle-browser="handleToggleBrowser" />
         </div>
 
-        <div class="divider" @mousedown="startResize"></div>
+        <div v-if="fileBrowserVisible" class="divider" @mousedown="startResize"></div>
 
-        <div class="browser-panel">
+        <div v-if="fileBrowserVisible" class="browser-panel">
           <FileBrowser :connectionString="connectionString" />
         </div>
       </div>
@@ -28,6 +28,7 @@ const connected = ref(false);
 const connectionString = ref<string>('');
 const terminalWidth = ref(800); // Default width
 const isResizing = ref(false);
+const fileBrowserVisible = ref(true);
 
 const checkConnectionStatus = async () => {
   try {
@@ -55,6 +56,10 @@ const handleConnected = async () => {
   console.log('[App] Connected state set to true, Terminal component should now be rendered');
   // Fetch connection string after connecting
   await checkConnectionStatus();
+};
+
+const handleToggleBrowser = (visible: boolean) => {
+  fileBrowserVisible.value = visible;
 };
 
 const startResize = (e: MouseEvent) => {
