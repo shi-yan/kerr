@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use futures::{sink::SinkExt, stream::StreamExt, FutureExt};
+use futures::{sink::SinkExt, stream::StreamExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -18,10 +18,21 @@ use tokio::sync::Mutex;
 
 use crate::custom_explorer::filesystem::{Filesystem, RemoteFilesystem};
 use crate::debug_log;
+use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
 struct Asset;
+
+/// Port forwarding session
+struct PortForwardingSession {
+    id: String,
+    name: Option<String>,
+    local_port: u16,
+    remote_port: u16,
+    stop_tx: mpsc::UnboundedSender<()>,
+}
 
 /// Shared state for the web UI
 struct AppState {
@@ -31,10 +42,11 @@ struct AppState {
     connection: Arc<Mutex<Option<Arc<iroh::endpoint::Connection>>>>,
     connection_string: Arc<Mutex<Option<String>>>,
     connection_alias: Arc<Mutex<Option<String>>>,
+    port_forwardings: Arc<Mutex<HashMap<String, PortForwardingSession>>>,
 }
 
 /// Run the web UI server
-pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
+pub async fn run_web_ui(connection_string: Option<String>, port: u16) -> Result<()> {
     // Create endpoint for future connections
     let endpoint = iroh::endpoint::Endpoint::bind().await?;
 
@@ -59,10 +71,14 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         connection: Arc::new(Mutex::new(connection)),
         connection_string: Arc::new(Mutex::new(conn_str_stored)),
         connection_alias: Arc::new(Mutex::new(conn_alias)),
+        port_forwardings: Arc::new(Mutex::new(HashMap::new())),
     });
 
     // Build our application router
     let app = Router::new()
+        .route("/api/auth/session", get(check_session))
+        .route("/api/auth/login", get(initiate_login))
+        .route("/api/auth/callback", get(handle_oauth_callback))
         .route("/api/connection/status", get(connection_status))
         .route("/api/connection/list", get(list_connections))
         .route("/api/connection/connect", post(connect_to_connection))
@@ -75,11 +91,13 @@ pub async fn run_web_ui(connection_string: Option<String>) -> Result<()> {
         .route("/api/file/content", post(write_file))
         .route("/api/file/metadata", get(get_metadata))
         .route("/api/file/delete", delete(delete_file))
+        .route("/api/port-forward/create", post(create_port_forward))
+        .route("/api/port-forward/disconnect", post(disconnect_port_forward))
         .fallback(static_handler)
         .with_state(state);
 
     // Start the server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("Web UI server running at http://{}", addr);
     println!("Open your browser to access the UI");
 
@@ -166,6 +184,128 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
                 .unwrap()
         }
     }
+}
+
+/// Check if user is logged in (has valid session)
+async fn check_session() -> Json<SessionCheckResponse> {
+    let has_session = crate::auth::load_session().is_ok();
+    Json(SessionCheckResponse {
+        logged_in: has_session,
+    })
+}
+
+#[derive(Serialize)]
+struct SessionCheckResponse {
+    logged_in: bool,
+}
+
+/// Initiate Google OAuth login by redirecting to Google
+async fn initiate_login(Query(params): Query<LoginParams>) -> Result<Response, (StatusCode, String)> {
+    use rand::Rng;
+
+    // Generate state token for CSRF protection
+    let mut rng = rand::rng();
+    let token: [u8; 32] = rng.random();
+    let state = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &token);
+
+    // Build redirect URI - use the port from the request
+    let port = params.port.unwrap_or(3000);
+    let redirect_uri = format!("http://127.0.0.1:{}/api/auth/callback", port);
+
+    // Build Google OAuth URL using url crate for proper encoding
+    let mut url = url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build URL: {}", e)))?;
+
+    let client_id = "402230363945-pmkrgrkkashlcdkf8oso0pptneioqn2o.apps.googleusercontent.com";
+    let scope = "email profile";
+
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("scope", scope)
+        .append_pair("state", &state);
+
+    let auth_url = url.to_string();
+
+    // Redirect to Google
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, auth_url)
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct LoginParams {
+    port: Option<u16>,
+}
+
+/// Handle OAuth callback from Google
+async fn handle_oauth_callback(Query(params): Query<CallbackParams>) -> Result<Response, (StatusCode, String)> {
+    // Extract auth code from query params
+    let auth_code = params.code.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing authorization code".to_string())
+    })?;
+
+    // Get port from state or default
+    let port = params.port.unwrap_or(3000);
+    let redirect_uri = format!("http://127.0.0.1:{}/api/auth/callback", port);
+
+    // Exchange code with backend server
+    let client = reqwest::Client::new();
+    let request_payload = serde_json::json!({
+        "code": auth_code,
+        "redirect_uri": redirect_uri,
+        "login_from": "web_ui",
+    });
+
+    let response = client
+        .post("https://0hepe5jz44.execute-api.us-west-2.amazonaws.com/default/login_with_code")
+        .json(&request_payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to contact auth server: {}", e)))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Auth server error: {}", error_text)));
+    }
+
+    let login_response: crate::auth::LoginResponse = response
+        .json()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse response: {}", e)))?;
+
+    // Save session to file
+    let config_dir = directories::ProjectDirs::from("app", "freewill", "kerr")
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get config dir".to_string()))?
+        .config_dir()
+        .to_path_buf();
+
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create config dir: {}", e)))?;
+
+    let session_file = config_dir.join("session.json");
+    let json_data = serde_json::to_string_pretty(&login_response)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize session: {}", e)))?;
+
+    std::fs::write(&session_file, json_data)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write session: {}", e)))?;
+
+    // Redirect back to home page
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/")
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+    port: Option<u16>,
 }
 
 /// Check connection status
@@ -1053,5 +1193,301 @@ async fn delete_file(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to delete file: {}", e),
         )),
+    }
+}
+
+/// Request to create a port forwarding
+#[derive(Deserialize)]
+struct CreatePortForwardRequest {
+    name: Option<String>,
+    local_port: u16,
+    remote_port: u16,
+}
+
+/// Response for port forwarding creation
+#[derive(Serialize)]
+struct CreatePortForwardResponse {
+    id: String,
+}
+
+/// Request to disconnect a port forwarding
+#[derive(Deserialize)]
+struct DisconnectPortForwardRequest {
+    id: String,
+}
+
+/// Create a new port forwarding
+async fn create_port_forward(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreatePortForwardRequest>,
+) -> Result<Json<CreatePortForwardResponse>, (StatusCode, String)> {
+    // Generate unique ID
+    use std::time::SystemTime;
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let id = format!("pf_{}_{}", timestamp, rand::random::<u32>());
+
+    // Get connection
+    let connection = {
+        let conn_lock = state.connection.lock().await;
+        match conn_lock.as_ref() {
+            Some(conn) => Arc::clone(conn),
+            None => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Not connected to remote host".to_string(),
+                ))
+            }
+        }
+    };
+
+    // Bind TCP listener on local port
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", payload.local_port))
+        .await
+        .map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to bind to local port {}: {}", payload.local_port, e),
+        ))?;
+
+    // Create stop channel
+    let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
+
+    // Spawn task to accept connections and forward them
+    let session_id = format!("tcp_relay_{}", id);
+    let remote_port = payload.remote_port;
+    let id_for_task = id.clone();
+    let local_port_for_task = payload.local_port;
+    tokio::spawn(async move {
+        // Open single QUIC stream for TcpRelay session (multiplexed)
+        let (mut send, recv) = match connection.open_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                eprintln!("[PORT_FORWARD] Failed to open QUIC stream: {}", e);
+                return;
+            }
+        };
+
+        // Send Hello envelope for TcpRelay session
+        let hello_envelope = crate::MessageEnvelope {
+            session_id: session_id.clone(),
+            payload: crate::MessagePayload::Client(crate::ClientMessage::Hello {
+                session_type: crate::SessionType::TcpRelay,
+            }),
+        };
+        if let Err(e) = crate::send_envelope(&mut send, &hello_envelope).await {
+            eprintln!("[PORT_FORWARD] Failed to send Hello envelope: {}", e);
+            return;
+        }
+
+        // Wrap streams in Arc<Mutex> for sharing
+        let send = Arc::new(Mutex::new(send));
+        let recv = Arc::new(Mutex::new(recv));
+
+        // Track TCP connections with stream_ids
+        let next_stream_id = Arc::new(Mutex::new(1u32));
+
+        loop {
+            tokio::select! {
+                // Accept new TCP connection
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((tcp_stream, _)) => {
+                            let stream_id = {
+                                let mut id_lock = next_stream_id.lock().await;
+                                let id = *id_lock;
+                                *id_lock += 1;
+                                id
+                            };
+
+                            println!("[PORT_FORWARD] Accepted connection on local port {}, forwarding to remote port {} (stream_id={})",
+                                local_port_for_task, remote_port, stream_id);
+
+                            // Send TcpOpen message
+                            let open_msg = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Client(crate::ClientMessage::TcpOpen {
+                                    stream_id,
+                                    destination_port: remote_port,
+                                }),
+                            };
+                            {
+                                let mut send_lock = send.lock().await;
+                                if let Err(e) = crate::send_envelope(&mut *send_lock, &open_msg).await {
+                                    eprintln!("[PORT_FORWARD] Failed to send TcpOpen: {}", e);
+                                    continue;
+                                }
+                            }
+
+                            // Wait for TcpOpenResponse
+                            let open_response = {
+                                let mut recv_lock = recv.lock().await;
+                                match crate::recv_envelope(&mut *recv_lock).await {
+                                    Ok(envelope) => envelope,
+                                    Err(e) => {
+                                        eprintln!("[PORT_FORWARD] Failed to receive TcpOpenResponse: {}", e);
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            // Check if connection was successful
+                            match open_response.payload {
+                                crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse { success, error, .. }) => {
+                                    if !success {
+                                        eprintln!("[PORT_FORWARD] Remote connection failed: {:?}", error);
+                                        continue;
+                                    }
+                                }
+                                _ => {
+                                    eprintln!("[PORT_FORWARD] Unexpected response to TcpOpen");
+                                    continue;
+                                }
+                            }
+
+                            println!("[PORT_FORWARD] Remote connection established for stream_id={}", stream_id);
+
+                            // Spawn task to handle this TCP connection bidirectionally
+                            let send_clone = Arc::clone(&send);
+                            let recv_clone = Arc::clone(&recv);
+                            let session_id_clone = session_id.clone();
+                            tokio::spawn(async move {
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                                let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+                                // Task to read from local TCP and send to remote via QUIC
+                                let send_task = {
+                                    let send_for_task = Arc::clone(&send_clone);
+                                    let session_id_for_task = session_id_clone.clone();
+                                    tokio::spawn(async move {
+                                        let mut buf = vec![0u8; 8192];
+                                        loop {
+                                            match tcp_read.read(&mut buf).await {
+                                                Ok(0) => break,  // EOF
+                                                Ok(n) => {
+                                                    let data_msg = crate::MessageEnvelope {
+                                                        session_id: session_id_for_task.clone(),
+                                                        payload: crate::MessagePayload::Client(crate::ClientMessage::TcpData {
+                                                            stream_id,
+                                                            data: buf[..n].to_vec(),
+                                                        }),
+                                                    };
+                                                    let mut send_lock = send_for_task.lock().await;
+                                                    if crate::send_envelope(&mut *send_lock, &data_msg).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                                Err(_) => break,
+                                            }
+                                        }
+
+                                        // Send TcpClose
+                                        let close_msg = crate::MessageEnvelope {
+                                            session_id: session_id_for_task.clone(),
+                                            payload: crate::MessagePayload::Client(crate::ClientMessage::TcpClose {
+                                                stream_id,
+                                            }),
+                                        };
+                                        let mut send_lock = send_for_task.lock().await;
+                                        let _ = crate::send_envelope(&mut *send_lock, &close_msg).await;
+                                    })
+                                };
+
+                                // Task to receive from QUIC and write to local TCP
+                                let recv_task = tokio::spawn(async move {
+                                    loop {
+                                        let envelope = {
+                                            let mut recv_lock = recv_clone.lock().await;
+                                            match crate::recv_envelope(&mut *recv_lock).await {
+                                                Ok(env) => env,
+                                                Err(_) => break,
+                                            }
+                                        };
+
+                                        match envelope.payload {
+                                            crate::MessagePayload::Server(crate::ServerMessage::TcpDataResponse { stream_id: resp_id, data }) => {
+                                                if resp_id == stream_id {
+                                                    if tcp_write.write_all(&data).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            crate::MessagePayload::Server(crate::ServerMessage::TcpCloseResponse { stream_id: resp_id, .. }) => {
+                                                if resp_id == stream_id {
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                });
+
+                                // Wait for either task to complete
+                                tokio::select! {
+                                    _ = send_task => {}
+                                    _ = recv_task => {}
+                                }
+
+                                println!("[PORT_FORWARD] Connection closed for stream_id={}", stream_id);
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("[PORT_FORWARD] Failed to accept TCP connection: {}", e);
+                        }
+                    }
+                }
+                // Stop signal received
+                _ = stop_rx.recv() => {
+                    println!("[PORT_FORWARD] Stopping port forwarding {}", id_for_task);
+
+                    // Send Disconnect message
+                    let disconnect_msg = crate::MessageEnvelope {
+                        session_id: session_id.clone(),
+                        payload: crate::MessagePayload::Client(crate::ClientMessage::Disconnect),
+                    };
+                    let mut send_lock = send.lock().await;
+                    let _ = crate::send_envelope(&mut *send_lock, &disconnect_msg).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    // Store session info
+    {
+        let mut forwardings = state.port_forwardings.lock().await;
+        forwardings.insert(id.clone(), PortForwardingSession {
+            id: id.clone(),
+            name: payload.name,
+            local_port: payload.local_port,
+            remote_port: payload.remote_port,
+            stop_tx,
+        });
+    }
+
+    println!("[PORT_FORWARD] Created port forwarding {}: {} -> {}", id, payload.local_port, payload.remote_port);
+
+    Ok(Json(CreatePortForwardResponse { id }))
+}
+
+/// Disconnect a port forwarding
+async fn disconnect_port_forward(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DisconnectPortForwardRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut forwardings = state.port_forwardings.lock().await;
+
+    if let Some(session) = forwardings.remove(&payload.id) {
+        // Send stop signal
+        let _ = session.stop_tx.send(());
+        println!("[PORT_FORWARD] Disconnected port forwarding {}", payload.id);
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("Port forwarding {} not found", payload.id),
+        ))
     }
 }

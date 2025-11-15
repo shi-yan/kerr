@@ -84,6 +84,9 @@ enum Commands {
     Ui {
         /// Optional connection string from the server (if not provided, will show connection selector)
         connection_string: Option<String>,
+        /// Port to run the web server on (default: 3000)
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
     },
 }
 
@@ -174,8 +177,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Ui { connection_string } => {
-            kerr::web_ui::run_web_ui(connection_string).await
+        Commands::Ui { connection_string, port } => {
+            kerr::web_ui::run_web_ui(connection_string, port).await
                 .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
         }
     }

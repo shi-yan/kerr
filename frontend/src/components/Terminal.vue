@@ -20,9 +20,15 @@
           </span>
         </span>
       </div>
-      <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
-        {{ connectionStatus }}
-      </span>
+      <div class="header-right">
+        <button class="toggle-browser-btn" @click="toggleFileBrowser" :title="fileBrowserVisible ? 'Hide File Browser' : 'Show File Browser'">
+          <span class="material-symbols-outlined">{{ fileBrowserVisible ? 'right_panel_close' : 'right_panel_open' }}</span>
+        </button>
+        <PortForwarding />
+        <span v-if="connectionStatus" class="connection-status" :class="connectionStatus">
+          {{ connectionStatus }}
+        </span>
+      </div>
     </div>
     <div ref="terminalRef" class="terminal"></div>
   </div>
@@ -33,6 +39,11 @@ import { ref, onMounted, onBeforeUnmount } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import PortForwarding from './PortForwarding.vue';
+
+const emit = defineEmits<{
+  toggleBrowser: [visible: boolean]
+}>();
 
 const terminalRef = ref<HTMLElement | null>(null);
 const connectionStatus = ref<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
@@ -41,6 +52,7 @@ const connectionInfo = ref<{
   connectionString?: string;
   fullConnectionString?: string;
 } | null>(null);
+const fileBrowserVisible = ref(true);
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -74,6 +86,27 @@ const copyConnectionString = async () => {
   } catch (e) {
     console.error('Failed to copy connection string:', e);
   }
+};
+
+const toggleFileBrowser = () => {
+  fileBrowserVisible.value = !fileBrowserVisible.value;
+  emit('toggleBrowser', fileBrowserVisible.value);
+
+  // Trigger terminal resize after toggle to ensure it fits the new layout
+  setTimeout(() => {
+    if (fitAddon && terminal) {
+      fitAddon.fit();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const msg = {
+          type: 'resize',
+          cols: terminal.cols,
+          rows: terminal.rows,
+        };
+        console.log('[TERMINAL] Sending resize after browser toggle:', msg.cols, 'x', msg.rows);
+        ws.send(JSON.stringify(msg));
+      }
+    }
+  }, 150);
 };
 
 const handleDisconnect = async () => {
@@ -111,6 +144,20 @@ const connectWebSocket = () => {
     console.log('[TERMINAL] WebSocket connection opened successfully');
     connectionStatus.value = 'connected';
     terminal?.writeln('Connected to remote shell...\r\n');
+
+    // Send initial resize after connection to ensure PTY has correct dimensions
+    setTimeout(() => {
+      if (terminal && fitAddon) {
+        fitAddon.fit();
+        const msg = {
+          type: 'resize',
+          cols: terminal.cols,
+          rows: terminal.rows,
+        };
+        console.log('[TERMINAL] Sending initial resize after connection:', msg.cols, 'x', msg.rows);
+        ws?.send(JSON.stringify(msg));
+      }
+    }, 150);
   };
 
   ws.onmessage = (event) => {
@@ -174,8 +221,13 @@ onMounted(async () => {
   // Open terminal in DOM
   terminal.open(terminalRef.value);
 
-  // Fit terminal to container
-  fitAddon.fit();
+  // Fit terminal to container - use setTimeout to ensure DOM is fully rendered
+  setTimeout(() => {
+    if (fitAddon) {
+      fitAddon.fit();
+      console.log('[TERMINAL] Initial fit - cols:', terminal?.cols, 'rows:', terminal?.rows);
+    }
+  }, 100);
 
   // Handle terminal input
   terminal.onData((data) => {
@@ -265,6 +317,12 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .terminal-title {
   font-size: 13px;
   color: #d4d4d4;
@@ -320,6 +378,29 @@ onMounted(async () => {
 
 .disconnect-btn .material-symbols-outlined {
   font-size: 16px;
+}
+
+.toggle-browser-btn {
+  padding: 4px 8px;
+  background: transparent;
+  color: #d4d4d4;
+  border: 1px solid #3e3e42;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.toggle-browser-btn:hover {
+  background: #3e3e42;
+  border-color: #4e4e52;
+}
+
+.toggle-browser-btn .material-symbols-outlined {
+  font-size: 18px;
 }
 
 .connection-status {
