@@ -8,6 +8,38 @@ use std::io::Write;
 use std::path::Path;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+/// A writer that converts \n to \r\n for proper terminal display
+struct CrLfWriter<W: Write> {
+    inner: W,
+}
+
+impl<W: Write> CrLfWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner }
+    }
+}
+
+impl<W: Write> Write for CrLfWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Convert \n to \r\n
+        let mut output = Vec::new();
+        for &byte in buf {
+            if byte == b'\n' {
+                output.push(b'\r');
+                output.push(b'\n');
+            } else {
+                output.push(byte);
+            }
+        }
+        self.inner.write_all(&output)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Initialize logging for the kerr server
 ///
 /// Sets up tracing to write to the specified log file with:
@@ -66,8 +98,9 @@ pub fn init_server_logging<P: AsRef<Path>>(log_file: P) -> Result<tracing_append
         .with_line_number(false);
 
     // Also output to stderr for interactive use
+    // Wrap stderr with CrLfWriter to convert \n to \r\n for proper terminal display
     let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
+        .with_writer(|| CrLfWriter::new(std::io::stderr()))
         .with_ansi(true)
         .with_target(false)
         .with_thread_ids(false)
@@ -100,6 +133,7 @@ pub fn init_console_logging() {
         .unwrap_or_else(|_| EnvFilter::new("warn"));
 
     tracing_subscriber::fmt()
+        .with_writer(|| CrLfWriter::new(std::io::stderr()))
         .with_env_filter(env_filter)
         .with_target(false)
         .init();
