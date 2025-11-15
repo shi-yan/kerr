@@ -603,13 +603,17 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
+    // Generate a unique session ID for this ping session
+    use rand::Rng;
+    let session_id = format!("ping_{}", rand::rng().random::<u64>());
+
     // Send Hello message to indicate this is a ping test session
-    let config = config::standard();
     let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::Ping };
-    let encoded = bincode::encode_to_vec(&hello_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello_msg),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     println!("\n╔══════════════════════════════════════════════════════════════════════╗");
     println!("║                    Network Performance Test                          ║");
@@ -629,27 +633,21 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
 
         // Send ping request
         let ping_msg = ClientMessage::PingRequest { data: payload };
-        let encoded = bincode::encode_to_vec(&ping_msg, config).unwrap();
-        let len = (encoded.len() as u32).to_be_bytes();
-        send.write_all(&len).await.e()?;
-        send.write_all(&encoded).await.e()?;
+        let ping_envelope = crate::MessageEnvelope {
+            session_id: session_id.clone(),
+            payload: crate::MessagePayload::Client(ping_msg),
+        };
+        crate::send_envelope(&mut send, &ping_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
         // Receive response
-        let mut len_bytes = [0u8; 4];
-        recv.read_exact(&mut len_bytes).await.e()?;
-        let msg_len = u32::from_be_bytes(len_bytes) as usize;
-        let mut msg_bytes = vec![0u8; msg_len];
-        recv.read_exact(&mut msg_bytes).await.e()?;
+        let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
         // Stop timer
         let elapsed = start.elapsed();
 
-        // Decode response
-        let (response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-            .expect("Failed to decode server response");
-
-        match response {
-            ServerMessage::PingResponse { data } => {
+        // Extract the server message from the envelope
+        match response_envelope.payload {
+            crate::MessagePayload::Server(ServerMessage::PingResponse { data }) => {
                 // Verify we got the same size back
                 if data.len() != size {
                     eprintln!("Warning: Expected {} bytes back, got {}", size, data.len());
@@ -658,10 +656,11 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
                 // Calculate metrics
                 let rtt_ms = elapsed.as_secs_f64() * 1000.0;
 
-                // Total bytes transferred (both directions, including protocol overhead)
-                let encoded_size = encoded.len();
-                let response_size = msg_bytes.len() + 4; // +4 for length prefix
-                let total_bytes = encoded_size + 4 + response_size; // +4 for request length prefix
+                // Estimate total bytes transferred (both directions, including protocol overhead)
+                // Envelope overhead includes session_id string + bincode encoding overhead
+                let estimated_request_overhead = session_id.len() + 50; // rough estimate
+                let estimated_response_overhead = session_id.len() + 50;
+                let total_bytes = size + estimated_request_overhead + size + estimated_response_overhead;
 
                 // Throughput in MB/s (total data / time)
                 let throughput_mbps = if elapsed.as_secs_f64() > 0.0 {
@@ -708,10 +707,11 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
 
     // Send disconnect
     let disconnect_msg = ClientMessage::Disconnect;
-    let encoded = bincode::encode_to_vec(&disconnect_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let disconnect_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(disconnect_msg),
+    };
+    crate::send_envelope(&mut send, &disconnect_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
