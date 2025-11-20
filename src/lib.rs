@@ -197,8 +197,6 @@ pub async fn send_envelope(
 pub async fn recv_envelope(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> Result<MessageEnvelope, Box<dyn std::error::Error>> {
-    use tokio::io::AsyncReadExt;
-
     let config = bincode::config::standard();
 
     // Read length prefix

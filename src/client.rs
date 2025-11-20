@@ -1039,6 +1039,7 @@ pub async fn run_tcp_relay(
 pub async fn run_proxy(
     connection_string: &str,
     port: u16,
+    enable_dns: bool,
 ) -> Result<()> {
     use tokio::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1058,6 +1059,18 @@ pub async fn run_proxy(
     let conn = endpoint.connect(node_addr, crate::ALPN)
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to connect: {}", e)))?;
+
+    // Start DNS proxy if requested
+    let _dns_task = if enable_dns {
+        let conn_clone = conn.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = start_dns_proxy_task(conn_clone).await {
+                eprintln!("DNS proxy error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
 
     let (mut send, mut recv) = conn.open_bi()
         .await
@@ -1083,6 +1096,9 @@ pub async fn run_proxy(
 
     println!("HTTP/HTTPS proxy listening on 127.0.0.1:{}", port);
     println!("Configure your browser to use this as an HTTP proxy");
+    if enable_dns {
+        println!("DNS proxy also running on 127.0.0.1:53");
+    }
     println!("Press Ctrl+C to stop");
 
     // Shared state for tracking TCP connections
@@ -1356,6 +1372,163 @@ pub async fn run_proxy(
             println!("Connection closed for stream {}", stream_id);
         });
     }
+}
+
+/// Helper function to start DNS proxy using an existing connection
+async fn start_dns_proxy_task(conn: iroh::endpoint::Connection) -> Result<()> {
+    use tokio::net::UdpSocket;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::net::SocketAddr;
+
+    let (mut send, mut recv) = conn.open_bi()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
+
+    // Send Hello message with Dns session type
+    let hello = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::Dns,
+    };
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(&hello, config)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
+    send.write_all(&encoded).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
+
+    // Bind UDP socket for DNS (port 53)
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:53")
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to bind to UDP port 53: {}. You may need sudo/admin privileges.", e)))?);
+
+    println!("DNS server listening on 127.0.0.1:53");
+
+    // Track pending queries: query_id -> (client_addr, original_transaction_id)
+    let pending_queries: Arc<Mutex<HashMap<u32, (SocketAddr, u16)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_query_id = Arc::new(AtomicU32::new(1));
+
+    // Wrap send stream in Arc<Mutex> for sharing between tasks
+    let send = Arc::new(Mutex::new(send));
+    let send_clone = Arc::clone(&send);
+    let socket_clone = Arc::clone(&socket);
+
+    // Task to handle incoming DNS responses from server
+    let pending_queries_clone = Arc::clone(&pending_queries);
+    let _recv_task = tokio::spawn(async move {
+        let config = bincode::config::standard();
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+                break;
+            }
+
+            // Decode message
+            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+
+            // Handle DNS response
+            match msg {
+                crate::ServerMessage::DnsResponse { query_id, response_data } => {
+                    // Look up the original client address and transaction ID
+                    let pending = pending_queries_clone.lock().await.remove(&query_id);
+
+                    if let Some((client_addr, _original_tid)) = pending {
+                        // Send response back to client
+                        if let Err(e) = socket_clone.send_to(&response_data, &client_addr).await {
+                            eprintln!("Failed to send DNS response to {}: {}", client_addr, e);
+                        } else {
+                            println!("Sent DNS response to {} ({} bytes)", client_addr, response_data.len());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Main loop: accept incoming DNS queries
+    let mut buffer = vec![0u8; 512]; // Standard DNS UDP packet size
+    loop {
+        let (len, client_addr) = match socket.recv_from(&mut buffer).await {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("Failed to receive DNS query: {}", e);
+                continue;
+            }
+        };
+
+        println!("Received DNS query from {} ({} bytes)", client_addr, len);
+
+        // Parse DNS query to extract transaction ID and ensure it's valid
+        let query_data = buffer[..len].to_vec();
+
+        // Log the query for debugging
+        if let Ok(packet) = simple_dns::Packet::parse(&query_data) {
+            if let Some(question) = packet.questions.first() {
+                println!("  Query: {} (type: {:?})", question.qname, question.qtype);
+            }
+        }
+
+        // Get next query ID for tracking
+        let query_id = next_query_id.fetch_add(1, Ordering::Relaxed);
+
+        // Extract transaction ID from the DNS packet (first 2 bytes)
+        let transaction_id = if query_data.len() >= 2 {
+            u16::from_be_bytes([query_data[0], query_data[1]])
+        } else {
+            0
+        };
+
+        // Store the mapping so we can send the response back to the right client
+        pending_queries.lock().await.insert(query_id, (client_addr, transaction_id));
+
+        // Send DNS query to remote server via P2P
+        let dns_msg = crate::ClientMessage::DnsQuery {
+            query_id,
+            query_data,
+        };
+
+        let config = bincode::config::standard();
+        let encoded = match bincode::encode_to_vec(&dns_msg, config) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Failed to encode DnsQuery: {}", e);
+                continue;
+            }
+        };
+        let len = (encoded.len() as u32).to_be_bytes();
+
+        {
+            let mut send_locked = send_clone.lock().await;
+            if let Err(e) = send_locked.write_all(&len).await {
+                eprintln!("Failed to send length: {}", e);
+                break;
+            }
+            if let Err(e) = send_locked.write_all(&encoded).await {
+                eprintln!("Failed to send DnsQuery: {}", e);
+                break;
+            }
+        }
+
+        println!("Forwarded DNS query {} to remote server", query_id);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 /// Run a DNS server that forwards queries through the Kerr connection

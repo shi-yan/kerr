@@ -81,6 +81,9 @@ enum Commands {
         /// Local port to listen on (default: 8080)
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// Also start a DNS server on port 53 (requires sudo/admin)
+        #[arg(long)]
+        dns: bool,
     },
     /// Login with Google OAuth2
     Login,
@@ -94,14 +97,6 @@ enum Commands {
         connection_string: Option<String>,
         /// Port to run the web server on (default: 3000)
         #[arg(short, long, default_value = "3000")]
-        port: u16,
-    },
-    /// Start a local DNS server that forwards queries through the P2P connection
-    Dns {
-        /// Connection string from the server
-        connection_string: String,
-        /// Local port to listen on (default: 53, requires sudo/admin)
-        #[arg(short, long, default_value = "53")]
         port: u16,
     },
 }
@@ -156,8 +151,8 @@ async fn main() -> Result<()> {
         Commands::Ping { connection_string } => {
             kerr::client::ping_test(connection_string).await?;
         }
-        Commands::Proxy { connection_string, port } => {
-            kerr::client::run_proxy(&connection_string, port).await?;
+        Commands::Proxy { connection_string, port, dns } => {
+            kerr::client::run_proxy(&connection_string, port, dns).await?;
         }
         Commands::Login => {
             kerr::auth::login().await?;
@@ -189,8 +184,7 @@ async fn main() -> Result<()> {
                     println!("  Browse:  kerr browse {}", conn_str);
                     println!("  Relay:   kerr relay {} <local_port> <remote_port>", conn_str);
                     println!("  Ping:    kerr ping {}", conn_str);
-                    println!("  Proxy:   kerr proxy {} [--port 8080]", conn_str);
-                    println!("  DNS:     kerr dns {} [--port 53]", conn_str);
+                    println!("  Proxy:   kerr proxy {} [--port 8080] [--dns]", conn_str);
                     println!("  Web UI:  kerr ui {}", conn_str);
                     println!();
                 }
@@ -202,9 +196,6 @@ async fn main() -> Result<()> {
         Commands::Ui { connection_string, port } => {
             kerr::web_ui::run_web_ui(connection_string, port).await
                 .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
-        }
-        Commands::Dns { connection_string, port } => {
-            kerr::client::run_dns_proxy(&connection_string, port).await?;
         }
     }
 
