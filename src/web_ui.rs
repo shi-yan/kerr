@@ -1309,6 +1309,7 @@ async fn create_port_forward(
                                 session_id: session_id.clone(),
                                 payload: crate::MessagePayload::Client(crate::ClientMessage::TcpOpen {
                                     stream_id,
+                                    destination_host: None,  // Connect to localhost on remote server
                                     destination_port: remote_port,
                                 }),
                             };

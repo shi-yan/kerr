@@ -26,6 +26,10 @@ pub enum SessionType {
     TcpRelay,
     /// Network performance testing session
     Ping,
+    /// HTTP/HTTPS proxy session
+    HttpProxy,
+    /// DNS-over-P2P session
+    Dns,
 }
 
 /// Message envelope for multiplexing multiple sessions over a single stream
@@ -79,13 +83,15 @@ pub enum ClientMessage {
     /// Request to delete a file or directory (for file browser)
     FsDelete { path: String },
     /// Open a new TCP connection on the remote server
-    TcpOpen { stream_id: u32, destination_port: u16 },
+    TcpOpen { stream_id: u32, destination_host: Option<String>, destination_port: u16 },
     /// Send TCP data to a remote connection
     TcpData { stream_id: u32, data: Vec<u8> },
     /// Close a TCP connection
     TcpClose { stream_id: u32 },
     /// Ping request with payload
     PingRequest { data: Vec<u8> },
+    /// DNS query request
+    DnsQuery { query_id: u32, query_data: Vec<u8> },
 }
 
 /// Messages sent from server to client
@@ -127,6 +133,8 @@ pub enum ServerMessage {
     TcpCloseResponse { stream_id: u32, error: Option<String> },
     /// Ping response echoing back the payload
     PingResponse { data: Vec<u8> },
+    /// DNS query response
+    DnsResponse { query_id: u32, response_data: Vec<u8> },
 }
 
 /// ALPN for the Kerr protocol

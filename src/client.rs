@@ -261,6 +261,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::PingResponse { .. } => {
                     // Ping response - not used in run_client (only for ping test)
                 }
+                ServerMessage::DnsResponse { .. } => {
+                    // DNS response - not used in run_client (only for dns proxy)
+                }
             }
         }
     });
@@ -914,6 +917,7 @@ pub async fn run_tcp_relay(
         // Send TcpOpen message
         let open_msg = crate::ClientMessage::TcpOpen {
             stream_id,
+            destination_host: None,  // Connect to localhost on remote server
             destination_port: remote_port,
         };
         let config = bincode::config::standard();
@@ -1028,5 +1032,507 @@ pub async fn run_tcp_relay(
     // Cleanup
     recv_task.abort();
 
+    Ok(())
+}
+
+/// Run an HTTP/HTTPS proxy that relays traffic through the Kerr connection
+pub async fn run_proxy(
+    connection_string: &str,
+    port: u16,
+) -> Result<()> {
+    use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // Decode connection string and connect to server
+    let node_addr = crate::decode_connection_string(connection_string)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
+
+    let endpoint = iroh::Endpoint::bind()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
+
+    let conn = endpoint.connect(node_addr, crate::ALPN)
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to connect: {}", e)))?;
+
+    let (mut send, mut recv) = conn.open_bi()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
+
+    // Send Hello message with HttpProxy session type
+    let hello = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::HttpProxy,
+    };
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(&hello, config)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
+    send.write_all(&encoded).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
+
+    // Listen on local port
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to bind to port {}: {}", port, e)))?;
+
+    println!("HTTP/HTTPS proxy listening on 127.0.0.1:{}", port);
+    println!("Configure your browser to use this as an HTTP proxy");
+    println!("Press Ctrl+C to stop");
+
+    // Shared state for tracking TCP connections
+    let tcp_connections: Arc<Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_stream_id = Arc::new(AtomicU32::new(1));
+
+    // Wrap send stream in Arc<Mutex> for sharing between tasks
+    let send = Arc::new(Mutex::new(send));
+    let send_clone = Arc::clone(&send);
+
+    // Task to handle incoming messages from server
+    let tcp_connections_clone = Arc::clone(&tcp_connections);
+    let _recv_task = tokio::spawn(async move {
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+                break;
+            }
+
+            // Decode message
+            let config = bincode::config::standard();
+            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+
+            // Handle server messages
+            match msg {
+                crate::ServerMessage::TcpDataResponse { stream_id, data } => {
+                    // Forward data to local TCP connection
+                    let connections = tcp_connections_clone.lock().await;
+                    if let Some(tx) = connections.get(&stream_id) {
+                        let _ = tx.send(data).await;
+                    }
+                }
+                crate::ServerMessage::TcpCloseResponse { stream_id, error } => {
+                    if let Some(err) = error {
+                        eprintln!("Remote TCP connection {} closed with error: {}", stream_id, err);
+                    }
+                    // Remove connection from map (this will cause the local connection to close)
+                    tcp_connections_clone.lock().await.remove(&stream_id);
+                }
+                crate::ServerMessage::TcpOpenResponse { stream_id, success, error } => {
+                    if !success {
+                        eprintln!("Failed to open remote connection {}: {}", stream_id, error.unwrap_or_default());
+                        tcp_connections_clone.lock().await.remove(&stream_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Accept incoming HTTP/HTTPS connections
+    loop {
+        let (mut client_socket, client_addr) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("Accepted connection from {}", client_addr);
+
+        let send_for_task = Arc::clone(&send_clone);
+        let tcp_connections_for_task = Arc::clone(&tcp_connections);
+        let next_stream_id_for_task = Arc::clone(&next_stream_id);
+
+        // Spawn task to handle this HTTP connection
+        tokio::spawn(async move {
+            // Read the initial HTTP request to determine the target
+            let mut buffer = vec![0u8; 8192];
+            let bytes_read = match client_socket.read(&mut buffer).await {
+                Ok(n) if n > 0 => n,
+                _ => return,
+            };
+
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+            let mut headers = request.split("\r\n");
+
+            let request_line = match headers.next() {
+                Some(line) => line,
+                None => return,
+            };
+
+            // Parse the target host and port
+            let (target_host, target_port, is_connect) = if request_line.starts_with("CONNECT") {
+                // CONNECT method for HTTPS
+                let parts: Vec<&str> = request_line.split_whitespace().collect();
+                if parts.len() < 2 {
+                    return;
+                }
+                let host_port = parts[1];
+                let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+                    let h = &host_port[..colon_pos];
+                    let p = host_port[colon_pos + 1..].parse::<u16>().unwrap_or(443);
+                    (h.to_string(), p)
+                } else {
+                    (host_port.to_string(), 443)
+                };
+                println!("CONNECT request to {}:{}", host, port);
+                (host, port, true)
+            } else {
+                // Regular HTTP request - extract Host header
+                let mut host_value = None;
+                for line in headers {
+                    if line.to_lowercase().starts_with("host:") {
+                        host_value = line.split_whitespace().nth(1);
+                        break;
+                    }
+                }
+
+                let host_port = match host_value {
+                    Some(h) => h,
+                    None => {
+                        eprintln!("No Host header found in HTTP request");
+                        return;
+                    }
+                };
+
+                let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+                    let h = &host_port[..colon_pos];
+                    let p = host_port[colon_pos + 1..].parse::<u16>().unwrap_or(80);
+                    (h.to_string(), p)
+                } else {
+                    (host_port.to_string(), 80)
+                };
+
+                println!("HTTP request to {}:{}", host, port);
+                (host, port, false)
+            };
+
+            // Get next stream ID
+            let stream_id = next_stream_id_for_task.fetch_add(1, Ordering::Relaxed);
+
+            // Send TcpOpen message with the target host
+            let open_msg = crate::ClientMessage::TcpOpen {
+                stream_id,
+                destination_host: Some(target_host),
+                destination_port: target_port,
+            };
+            let config = bincode::config::standard();
+            let encoded = match bincode::encode_to_vec(&open_msg, config) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("Failed to encode TcpOpen: {}", e);
+                    return;
+                }
+            };
+            let len = (encoded.len() as u32).to_be_bytes();
+
+            {
+                let mut send_locked = send_for_task.lock().await;
+                if let Err(e) = send_locked.write_all(&len).await {
+                    eprintln!("Failed to send length: {}", e);
+                    return;
+                }
+                if let Err(e) = send_locked.write_all(&encoded).await {
+                    eprintln!("Failed to send TcpOpen: {}", e);
+                    return;
+                }
+            }
+
+            // Create channel for receiving data from server
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+            tcp_connections_for_task.lock().await.insert(stream_id, tx);
+
+            // For CONNECT, send 200 OK response to client
+            if is_connect {
+                let response = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+                if let Err(_) = client_socket.write_all(response).await {
+                    return;
+                }
+            } else {
+                // For HTTP, send the original request to the remote server
+                let data_msg = crate::ClientMessage::TcpData {
+                    stream_id,
+                    data: buffer[..bytes_read].to_vec(),
+                };
+                let config = bincode::config::standard();
+                let encoded = match bincode::encode_to_vec(&data_msg, config) {
+                    Ok(e) => e,
+                    Err(_) => return,
+                };
+                let len = (encoded.len() as u32).to_be_bytes();
+
+                let mut send_locked = send_for_task.lock().await;
+                if send_locked.write_all(&len).await.is_err() {
+                    return;
+                }
+                if send_locked.write_all(&encoded).await.is_err() {
+                    return;
+                }
+                drop(send_locked);
+            }
+
+            let (mut client_read, mut client_write) = client_socket.into_split();
+
+            // Task to read from client and send to remote
+            let send_task = {
+                let send_for_read = Arc::clone(&send_for_task);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        match client_read.read(&mut buf).await {
+                            Ok(0) => break, // EOF
+                            Ok(n) => {
+                                // Send data to remote
+                                let data_msg = crate::ClientMessage::TcpData {
+                                    stream_id,
+                                    data: buf[..n].to_vec(),
+                                };
+                                let config = bincode::config::standard();
+                                let encoded = match bincode::encode_to_vec(&data_msg, config) {
+                                    Ok(e) => e,
+                                    Err(_) => break,
+                                };
+                                let len = (encoded.len() as u32).to_be_bytes();
+
+                                let mut send_locked = send_for_read.lock().await;
+                                if send_locked.write_all(&len).await.is_err() {
+                                    break;
+                                }
+                                if send_locked.write_all(&encoded).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+            };
+
+            // Task to receive from remote and write to client
+            let write_task = tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if client_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Wait for either task to complete
+            tokio::select! {
+                _ = send_task => {}
+                _ = write_task => {}
+            }
+
+            // Send TcpClose message
+            let close_msg = crate::ClientMessage::TcpClose { stream_id };
+            let config = bincode::config::standard();
+            if let Ok(encoded) = bincode::encode_to_vec(&close_msg, config) {
+                let len = (encoded.len() as u32).to_be_bytes();
+                let mut send_locked = send_for_task.lock().await;
+                let _ = send_locked.write_all(&len).await;
+                let _ = send_locked.write_all(&encoded).await;
+            }
+
+            // Remove from connections map
+            tcp_connections_for_task.lock().await.remove(&stream_id);
+
+            println!("Connection closed for stream {}", stream_id);
+        });
+    }
+}
+
+/// Run a DNS server that forwards queries through the Kerr connection
+pub async fn run_dns_proxy(
+    connection_string: &str,
+    port: u16,
+) -> Result<()> {
+    use tokio::net::UdpSocket;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::net::SocketAddr;
+
+    // Decode connection string and connect to server
+    let node_addr = crate::decode_connection_string(connection_string)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
+
+    let endpoint = iroh::Endpoint::bind()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
+
+    let conn = endpoint.connect(node_addr, crate::ALPN)
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to connect: {}", e)))?;
+
+    let (mut send, mut recv) = conn.open_bi()
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
+
+    // Send Hello message with Dns session type
+    let hello = crate::ClientMessage::Hello {
+        session_type: crate::SessionType::Dns,
+    };
+    let config = bincode::config::standard();
+    let encoded = bincode::encode_to_vec(&hello, config)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
+    send.write_all(&encoded).await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
+
+    // Bind UDP socket for DNS
+    let socket = Arc::new(UdpSocket::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to bind to UDP port {}: {}. You may need sudo/admin privileges.", port, e)))?);
+
+    println!("DNS server listening on 127.0.0.1:{}", port);
+    println!("Configure your system to use this as DNS server (127.0.0.1)");
+    println!("Press Ctrl+C to stop");
+
+    // Track pending queries: query_id -> (client_addr, original_transaction_id)
+    let pending_queries: Arc<Mutex<HashMap<u32, (SocketAddr, u16)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_query_id = Arc::new(AtomicU32::new(1));
+
+    // Wrap send stream in Arc<Mutex> for sharing between tasks
+    let send = Arc::new(Mutex::new(send));
+    let send_clone = Arc::clone(&send);
+    let socket_clone = Arc::clone(&socket);
+
+    // Task to handle incoming DNS responses from server
+    let pending_queries_clone = Arc::clone(&pending_queries);
+    let _recv_task = tokio::spawn(async move {
+        let config = bincode::config::standard();
+        loop {
+            // Read message length
+            let mut len_bytes = [0u8; 4];
+            if let Err(_) = recv.read_exact(&mut len_bytes).await {
+                break;
+            }
+            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+            // Read message
+            let mut msg_bytes = vec![0u8; msg_len];
+            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
+                break;
+            }
+
+            // Decode message
+            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+
+            // Handle DNS response
+            match msg {
+                crate::ServerMessage::DnsResponse { query_id, response_data } => {
+                    // Look up the original client address and transaction ID
+                    let pending = pending_queries_clone.lock().await.remove(&query_id);
+
+                    if let Some((client_addr, _original_tid)) = pending {
+                        // Send response back to client
+                        // Note: The response_data already contains the correct transaction ID
+                        // because the server preserved it
+                        if let Err(e) = socket_clone.send_to(&response_data, &client_addr).await {
+                            eprintln!("Failed to send DNS response to {}: {}", client_addr, e);
+                        } else {
+                            println!("Sent DNS response to {} ({} bytes)", client_addr, response_data.len());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Main loop: accept incoming DNS queries
+    let mut buffer = vec![0u8; 512]; // Standard DNS UDP packet size
+    loop {
+        let (len, client_addr) = match socket.recv_from(&mut buffer).await {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("Failed to receive DNS query: {}", e);
+                continue;
+            }
+        };
+
+        println!("Received DNS query from {} ({} bytes)", client_addr, len);
+
+        // Parse DNS query to extract transaction ID and ensure it's valid
+        let query_data = buffer[..len].to_vec();
+
+        // We can optionally parse the DNS packet here to log what's being queried
+        // but we preserve the entire packet for forwarding
+        if let Ok(packet) = simple_dns::Packet::parse(&query_data) {
+            // Log the query for debugging
+            if let Some(question) = packet.questions.first() {
+                println!("  Query: {} (type: {:?})", question.qname, question.qtype);
+            }
+        }
+
+        // Get next query ID for tracking
+        let query_id = next_query_id.fetch_add(1, Ordering::Relaxed);
+
+        // Extract transaction ID from the DNS packet (first 2 bytes)
+        let transaction_id = if query_data.len() >= 2 {
+            u16::from_be_bytes([query_data[0], query_data[1]])
+        } else {
+            0
+        };
+
+        // Store the mapping so we can send the response back to the right client
+        pending_queries.lock().await.insert(query_id, (client_addr, transaction_id));
+
+        // Send DNS query to remote server via P2P
+        let dns_msg = crate::ClientMessage::DnsQuery {
+            query_id,
+            query_data,
+        };
+
+        let config = bincode::config::standard();
+        let encoded = match bincode::encode_to_vec(&dns_msg, config) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Failed to encode DnsQuery: {}", e);
+                continue;
+            }
+        };
+        let len = (encoded.len() as u32).to_be_bytes();
+
+        {
+            let mut send_locked = send_clone.lock().await;
+            if let Err(e) = send_locked.write_all(&len).await {
+                eprintln!("Failed to send length: {}", e);
+                break;
+            }
+            if let Err(e) = send_locked.write_all(&encoded).await {
+                eprintln!("Failed to send DnsQuery: {}", e);
+                break;
+            }
+        }
+
+        println!("Forwarded DNS query {} to remote server", query_id);
+    }
+
+    // This line is unreachable in practice, but needed for type checking
+    #[allow(unreachable_code)]
     Ok(())
 }

@@ -409,6 +409,33 @@ impl ProtocolHandler for KerrServer {
                                             sessions_for_cleanup.lock().await.remove(&session_id_clone);
                                         });
                                     }
+                                    crate::SessionType::HttpProxy => {
+                                        // HttpProxy uses the same handler as TcpRelay
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_tcp_relay_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "HttpProxy session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
+                                    }
+                                    crate::SessionType::Dns => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_dns_session_mux(
+                                                node_id_clone,
+                                                session_id_clone.clone(),
+                                                session_rx,
+                                                outgoing_tx_clone,
+                                            ).await {
+                                                tracing::error!(session_id = %session_id_clone, error = ?e, "Dns session error");
+                                            }
+                                            sessions_for_cleanup.lock().await.remove(&session_id_clone);
+                                        });
+                                    }
                                 }
                             } else {
                                 // Route message to existing session
@@ -1687,11 +1714,12 @@ impl KerrServer {
             };
 
             match msg {
-                crate::ClientMessage::TcpOpen { stream_id, destination_port } => {
-                    println!("\r\nOpening TCP connection {stream_id} to localhost:{destination_port}\r");
+                crate::ClientMessage::TcpOpen { stream_id, destination_host, destination_port } => {
+                    let target_host = destination_host.as_deref().unwrap_or("127.0.0.1");
+                    println!("\r\nOpening TCP connection {stream_id} to {target_host}:{destination_port}\r");
 
                     // Try to connect to remote port
-                    match TcpStream::connect(format!("127.0.0.1:{}", destination_port)).await {
+                    match TcpStream::connect(format!("{}:{}", target_host, destination_port)).await {
                         Ok(tcp_stream) => {
                             // Send success response
                             let response = crate::ServerMessage::TcpOpenResponse {
@@ -1957,12 +1985,13 @@ impl KerrServer {
         // Process incoming messages
         while let Some(msg) = incoming.recv().await {
             match msg {
-                crate::ClientMessage::TcpOpen { stream_id, destination_port } => {
-                    tracing::info!(session_id = %session_id, stream_id = stream_id, port = destination_port,
-                        "Opening TCP connection to localhost:{}", destination_port);
+                crate::ClientMessage::TcpOpen { stream_id, destination_host, destination_port } => {
+                    let target_host = destination_host.as_deref().unwrap_or("127.0.0.1");
+                    tracing::info!(session_id = %session_id, stream_id = stream_id, host = target_host, port = destination_port,
+                        "Opening TCP connection to {}:{}", target_host, destination_port);
 
                     // Try to connect to remote port
-                    match TcpStream::connect(format!("127.0.0.1:{}", destination_port)).await {
+                    match TcpStream::connect(format!("{}:{}", target_host, destination_port)).await {
                         Ok(tcp_stream) => {
                             // Send success response
                             let response = crate::MessageEnvelope {
@@ -2133,6 +2162,105 @@ impl KerrServer {
         }
 
         tracing::info!(session_id = %session_id, "Ping session closed");
+        Ok(())
+    }
+
+    async fn handle_dns_session_mux(
+        _node_id: iroh::PublicKey,
+        session_id: String,
+        mut incoming: tokio::sync::mpsc::UnboundedReceiver<crate::ClientMessage>,
+        outgoing: tokio::sync::mpsc::UnboundedSender<crate::MessageEnvelope>,
+    ) -> Result<(), AcceptError> {
+        use tokio::net::UdpSocket;
+        use std::sync::Arc;
+
+        tracing::info!(session_id = %session_id, "DNS session started (mux mode)");
+
+        // Create a UDP socket to query real DNS servers
+        // We'll use a common public DNS server (e.g., Google's 8.8.8.8)
+        let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::error!(session_id = %session_id, error = ?e, "Failed to create DNS socket");
+                return Ok(());
+            }
+        };
+
+        // Process incoming DNS queries
+        while let Some(msg) = incoming.recv().await {
+            match msg {
+                crate::ClientMessage::DnsQuery { query_id, query_data } => {
+                    tracing::info!(session_id = %session_id, query_id = query_id,
+                        "Received DNS query ({} bytes)", query_data.len());
+
+                    // Parse the DNS query to log what's being requested
+                    if let Ok(packet) = simple_dns::Packet::parse(&query_data) {
+                        if let Some(question) = packet.questions.first() {
+                            tracing::info!(session_id = %session_id, query_id = query_id,
+                                "DNS Query: {} (type: {:?})", question.qname, question.qtype);
+                        }
+                    }
+
+                    let outgoing_clone = outgoing.clone();
+                    let session_id_clone = session_id.clone();
+                    let socket_clone = Arc::clone(&socket);
+
+                    // Spawn a task to handle this DNS query
+                    tokio::spawn(async move {
+                        // Forward the DNS query to a public DNS server (Google DNS: 8.8.8.8:53)
+                        // You can also use other DNS servers like 1.1.1.1 (Cloudflare) or 208.67.222.222 (OpenDNS)
+                        let dns_server = "8.8.8.8:53";
+
+                        // Send query to DNS server
+                        if let Err(e) = socket_clone.send_to(&query_data, dns_server).await {
+                            tracing::error!(session_id = %session_id_clone, query_id = query_id,
+                                error = ?e, "Failed to send DNS query to {}", dns_server);
+                            return;
+                        }
+
+                        // Wait for response
+                        let mut response_buf = vec![0u8; 512]; // Standard DNS UDP response size
+                        let response_data = match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            socket_clone.recv_from(&mut response_buf)
+                        ).await {
+                            Ok(Ok((len, _addr))) => {
+                                tracing::info!(session_id = %session_id_clone, query_id = query_id,
+                                    "Received DNS response ({} bytes)", len);
+                                response_buf[..len].to_vec()
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!(session_id = %session_id_clone, query_id = query_id,
+                                    error = ?e, "Failed to receive DNS response");
+                                return;
+                            }
+                            Err(_) => {
+                                tracing::error!(session_id = %session_id_clone, query_id = query_id,
+                                    "DNS query timeout");
+                                return;
+                            }
+                        };
+
+                        // Send response back to client
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id_clone.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::DnsResponse {
+                                query_id,
+                                response_data,
+                            }),
+                        };
+                        let _ = outgoing_clone.send(response);
+
+                        tracing::info!(session_id = %session_id_clone, query_id = query_id,
+                            "Sent DNS response back to client");
+                    });
+                }
+                crate::ClientMessage::Disconnect => break,
+                _ => {}
+            }
+        }
+
+        tracing::info!(session_id = %session_id, "DNS session closed");
         Ok(())
     }
 }

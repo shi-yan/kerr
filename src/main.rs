@@ -74,6 +74,14 @@ enum Commands {
         /// Connection string from the server
         connection_string: String,
     },
+    /// Start a local HTTP/HTTPS proxy that relays traffic through the Kerr connection
+    Proxy {
+        /// Connection string from the server
+        connection_string: String,
+        /// Local port to listen on (default: 8080)
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
     /// Login with Google OAuth2
     Login,
     /// Logout and invalidate the current session
@@ -86,6 +94,14 @@ enum Commands {
         connection_string: Option<String>,
         /// Port to run the web server on (default: 3000)
         #[arg(short, long, default_value = "3000")]
+        port: u16,
+    },
+    /// Start a local DNS server that forwards queries through the P2P connection
+    Dns {
+        /// Connection string from the server
+        connection_string: String,
+        /// Local port to listen on (default: 53, requires sudo/admin)
+        #[arg(short, long, default_value = "53")]
         port: u16,
     },
 }
@@ -140,6 +156,9 @@ async fn main() -> Result<()> {
         Commands::Ping { connection_string } => {
             kerr::client::ping_test(connection_string).await?;
         }
+        Commands::Proxy { connection_string, port } => {
+            kerr::client::run_proxy(&connection_string, port).await?;
+        }
         Commands::Login => {
             kerr::auth::login().await?;
         }
@@ -180,6 +199,9 @@ async fn main() -> Result<()> {
         Commands::Ui { connection_string, port } => {
             kerr::web_ui::run_web_ui(connection_string, port).await
                 .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Web UI error: {}", e)))?;
+        }
+        Commands::Dns { connection_string, port } => {
+            kerr::client::run_dns_proxy(&connection_string, port).await?;
         }
     }
 
