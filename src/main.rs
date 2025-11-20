@@ -187,7 +187,10 @@ async fn main() -> Result<()> {
                     println!("  Send:    kerr send {} <local> <remote>", conn_str);
                     println!("  Pull:    kerr pull {} <remote> <local>", conn_str);
                     println!("  Browse:  kerr browse {}", conn_str);
+                    println!("  Relay:   kerr relay {} <local_port> <remote_port>", conn_str);
                     println!("  Ping:    kerr ping {}", conn_str);
+                    println!("  Proxy:   kerr proxy {} [--port 8080]", conn_str);
+                    println!("  DNS:     kerr dns {} [--port 53]", conn_str);
                     println!("  Web UI:  kerr ui {}", conn_str);
                     println!();
                 }

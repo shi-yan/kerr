@@ -21,6 +21,8 @@ Kerr is a next-generation peer-to-peer remote access and administration tool tha
   - [6. Web-Based Interface](#6-web-based-interface)
   - [7. Connection Management](#7-connection-management)
   - [8. Authentication & Session Management](#8-authentication--session-management)
+  - [9. HTTP/HTTPS Proxy](#9-httphttps-proxy)
+  - [10. DNS-over-P2P](#10-dns-over-p2p)
 - [Architecture & Technical Details](#architecture--technical-details)
 - [Use Cases](#use-cases)
 - [Advanced Usage](#advanced-usage)
@@ -57,6 +59,8 @@ Traditional remote access tools like SSH require:
 - **🌐 Web Interface** - Full-featured browser-based UI for remote administration
 - **🔐 Authentication** - Google OAuth2 integration for secure identity management
 - **💾 Connection Manager** - Save and organize connections with aliases
+- **🌍 HTTP/HTTPS Proxy** - Tunnel web traffic through P2P for censorship bypass
+- **🔒 DNS-over-P2P** - Encrypted DNS queries to bypass DNS censorship and poisoning
 
 ### Technical Highlights
 
@@ -110,6 +114,8 @@ Commands:
   Browse:  kerr browse eyJub2RlX2lkIjoiNGI0Yz...
   Relay:   kerr relay eyJub2RlX2lkIjoiNGI0Yz... <local_port> <remote_port>
   Ping:    kerr ping eyJub2RlX2lkIjoiNGI0Yz...
+  Proxy:   kerr proxy eyJub2RlX2lkIjoiNGI0Yz... [--port 8080]
+  DNS:     kerr dns eyJub2RlX2lkIjoiNGI0Yz... [--port 53]
 
 ─────────────────────────────────────────────────────────────────
 Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | p[i]ng | Ctrl+C
@@ -542,6 +548,258 @@ kerr serve --session /path/to/custom/session.json
 - Connection sharing within teams
 - Cross-device synchronization
 
+### 9. HTTP/HTTPS Proxy
+
+Create a local HTTP/HTTPS proxy that tunnels all web traffic through the P2P connection, enabling censorship bypass and secure browsing.
+
+```bash
+# Start HTTP/HTTPS proxy on default port 8080
+kerr proxy <CONNECTION_STRING>
+
+# Use custom port
+kerr proxy <CONNECTION_STRING> --port 3128
+```
+
+**How It Works:**
+
+The proxy intercepts HTTP and HTTPS traffic from your browser and forwards it through the encrypted P2P tunnel:
+
+```
+Browser → Local Proxy (127.0.0.1:8080) → P2P Tunnel → Remote Server → Internet
+```
+
+**Configuration:**
+
+After starting the proxy, configure your browser or system to use it:
+
+**Browser Configuration (Firefox/Chrome):**
+1. Open Settings → Network Settings
+2. Configure proxy manually:
+   - HTTP Proxy: `127.0.0.1`
+   - Port: `8080` (or your custom port)
+   - Also use for HTTPS: ✓
+
+**System-wide (macOS):**
+```bash
+networksetup -setwebproxy "Wi-Fi" 127.0.0.1 8080
+networksetup -setsecurewebproxy "Wi-Fi" 127.0.0.1 8080
+```
+
+**System-wide (Linux):**
+```bash
+# GNOME
+gsettings set org.gnome.system.proxy mode 'manual'
+gsettings set org.gnome.system.proxy.http host '127.0.0.1'
+gsettings set org.gnome.system.proxy.http port 8080
+```
+
+**System-wide (Windows):**
+```powershell
+# PowerShell (Run as Administrator)
+netsh winhttp set proxy 127.0.0.1:8080
+```
+
+**Features:**
+- **HTTP Support**: Regular HTTP traffic forwarding
+- **HTTPS Support**: CONNECT method tunneling for encrypted sites
+- **Multiple Connections**: Handles concurrent browser requests
+- **Automatic Parsing**: Extracts target hosts from HTTP headers
+- **Dynamic Routing**: Each request can go to a different destination
+- **Connection Pooling**: Efficient resource management
+- **Real-time Logging**: See all requests and connections
+
+**Supported Protocols:**
+- HTTP/1.1
+- HTTPS via CONNECT method
+- WebSocket connections
+- Any TCP-based protocol using HTTP/HTTPS
+
+**Use Cases:**
+- **Censorship Bypass**: Access blocked websites through remote server
+- **Geo-restriction Bypass**: Access region-locked content
+- **Privacy Protection**: Hide your browsing from local network
+- **Secure Public WiFi**: Encrypt traffic on untrusted networks
+- **Corporate Firewall Bypass**: Access restricted sites (with authorization)
+- **Development Testing**: Test applications through different network paths
+- **Ad-blocking**: Route through remote server with ad-blocking
+- **Content Filtering Bypass**: Access filtered content (educational/research)
+
+**Security Considerations:**
+- All traffic is encrypted through the P2P tunnel
+- Remote server performs actual DNS lookups and connections
+- Your IP is hidden from destination websites
+- Local network only sees encrypted P2P traffic
+
+**Performance:**
+- Low latency for direct P2P connections
+- Bandwidth limited by P2P connection quality
+- Minimal overhead for HTTP parsing
+- Efficient connection reuse
+
+**Stopping the Proxy:**
+- Press `Ctrl+C` to stop
+- Browser will automatically fail back to direct connection
+- Remember to disable proxy settings when done
+
+### 10. DNS-over-P2P
+
+Run a local DNS server that forwards all DNS queries through the encrypted P2P connection, bypassing DNS censorship and poisoning.
+
+```bash
+# Start DNS server on port 53 (requires sudo/root)
+sudo kerr dns <CONNECTION_STRING>
+
+# Use custom port (doesn't require sudo, but won't work for system DNS)
+kerr dns <CONNECTION_STRING> --port 5353
+```
+
+**How It Works:**
+
+Your DNS queries are encrypted and sent through the P2P tunnel, where the remote server performs the actual DNS lookup:
+
+```
+OS → Local DNS (127.0.0.1:53) → P2P Tunnel → Remote Server → Public DNS (8.8.8.8) → Internet
+```
+
+**System Configuration:**
+
+After starting the DNS server, configure your system to use it:
+
+**macOS:**
+```bash
+# Set DNS to localhost
+networksetup -setdnsservers Wi-Fi 127.0.0.1
+
+# Verify
+networksetup -getdnsservers Wi-Fi
+
+# To restore original DNS
+networksetup -setdnsservers Wi-Fi "Empty"
+```
+
+**Linux:**
+```bash
+# Edit /etc/resolv.conf (temporary until reboot)
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+
+# Or for systemd-resolved
+sudo systemctl stop systemd-resolved
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+
+# To restore
+sudo systemctl start systemd-resolved
+```
+
+**Windows (PowerShell as Administrator):**
+```powershell
+# Set DNS for your network adapter
+Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ServerAddresses "127.0.0.1"
+
+# Verify
+Get-DnsClientServerAddress -InterfaceAlias "Wi-Fi"
+
+# To restore (use DHCP)
+Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ResetServerAddresses
+```
+
+**Features:**
+- **Transaction ID Preservation**: Correctly maintains DNS transaction IDs for OS compatibility
+- **Full DNS Support**: Handles all DNS record types (A, AAAA, MX, TXT, etc.)
+- **UDP Protocol**: Standard DNS over UDP port 53
+- **Concurrent Queries**: Multiple simultaneous DNS lookups
+- **Query Logging**: See all DNS queries in real-time
+- **Low Latency**: Optimized for fast DNS resolution
+- **Automatic Timeout**: 5-second timeout per query
+- **Error Handling**: Graceful failure and retry
+
+**DNS Server Configuration:**
+
+By default, queries are forwarded to Google DNS (8.8.8.8). You can modify the upstream DNS server in the code:
+
+```rust
+// In server.rs, handle_dns_session_mux function
+let dns_server = "8.8.8.8:53";  // Change to your preferred DNS
+```
+
+**Popular DNS Servers:**
+- Google DNS: `8.8.8.8`, `8.8.4.4`
+- Cloudflare: `1.1.1.1`, `1.0.0.1`
+- OpenDNS: `208.67.222.222`, `208.67.220.220`
+- Quad9: `9.9.9.9`, `149.112.112.112`
+
+**Use Cases:**
+- **DNS Censorship Bypass**: Access blocked domains via uncensored DNS
+- **DNS Poisoning Protection**: Prevent DNS cache poisoning attacks
+- **Privacy Protection**: Hide DNS queries from ISP and local network
+- **DNSSEC Validation**: Use trusted DNS servers with DNSSEC
+- **Ad Blocking**: Route through DNS servers with ad-blocking
+- **Malware Protection**: Use DNS servers with malware filtering
+- **Parental Controls Bypass**: Access filtered content (with authorization)
+- **Geographic Restrictions**: Access geo-blocked services
+
+**Combined with HTTP Proxy:**
+
+For complete censorship bypass, use both together:
+
+```bash
+# Terminal 1: Start DNS proxy
+sudo kerr dns <CONNECTION_STRING>
+
+# Terminal 2: Start HTTP/HTTPS proxy
+kerr proxy <CONNECTION_STRING>
+
+# Configure system:
+# 1. Set DNS to 127.0.0.1
+# 2. Set HTTP/HTTPS proxy to 127.0.0.1:8080
+```
+
+This setup ensures:
+- ✅ DNS queries are encrypted and uncensored
+- ✅ Web traffic is encrypted and routed through remote server
+- ✅ Complete anonymity from local network perspective
+- ✅ Bypass both DNS and HTTP-level censorship
+
+**Security & Privacy:**
+- **Encryption**: All DNS queries encrypted via P2P tunnel
+- **No Logging**: DNS queries not logged on remote server (configurable)
+- **Transaction Privacy**: Original DNS transaction IDs preserved
+- **Full UDP Support**: Standard DNS protocol compliance
+- **Secure Transport**: QUIC with TLS 1.3 encryption
+
+**Performance:**
+- **Low Latency**: <50ms typical overhead for DNS queries
+- **Caching**: OS-level DNS caching still works
+- **Concurrent**: Handles multiple queries simultaneously
+- **Reliable**: Automatic retry and timeout handling
+
+**Troubleshooting:**
+
+```bash
+# Test DNS resolution
+nslookup google.com 127.0.0.1
+
+# Or using dig
+dig @127.0.0.1 google.com
+
+# Check if DNS server is running
+lsof -i :53  # Linux/macOS
+netstat -an | grep :53  # Windows
+```
+
+**Important Notes:**
+- Port 53 requires root/admin privileges
+- Some systems may cache DNS settings
+- Flush DNS cache after configuration changes:
+  - macOS: `sudo dscacheutil -flushcache`
+  - Linux: `sudo systemd-resolve --flush-caches`
+  - Windows: `ipconfig /flushdns`
+- Remember to restore DNS settings when finished
+
+**Stopping the DNS Server:**
+- Press `Ctrl+C` to stop
+- Restore original DNS settings (see configuration commands above)
+- Verify with `nslookup` or `dig` using external DNS
+
 ## Architecture & Technical Details
 
 ### Peer-to-Peer Networking
@@ -586,6 +844,8 @@ Kerr supports multiple concurrent session types over a single connection:
 3. **FileBrowser** - Directory listing and file metadata
 4. **TcpRelay** - Port forwarding proxy
 5. **Ping** - Network diagnostics
+6. **HttpProxy** - HTTP/HTTPS proxy for web traffic
+7. **Dns** - DNS-over-P2P for encrypted DNS queries
 
 #### Message Format
 
@@ -608,9 +868,10 @@ All messages use a length-prefixed binary protocol:
 - `FileChunk` - File data
 - `FsReadDir` - List directory
 - `FsReadFile` - Read file content
-- `TcpOpen` - Open TCP connection
+- `TcpOpen` - Open TCP connection (with optional destination host)
 - `TcpData` - Forward TCP data
 - `PingRequest` - Performance test
+- `DnsQuery` - DNS query forwarding
 
 **Server → Client:**
 - `Output` - Terminal output
@@ -620,6 +881,7 @@ All messages use a length-prefixed binary protocol:
 - `FsFileContent` - File data
 - `TcpDataResponse` - TCP data from remote
 - `PingResponse` - Performance test echo
+- `DnsResponse` - DNS query response
 - `Error` - Error message
 
 ### PTY Implementation
@@ -694,6 +956,16 @@ Server Process
 - Network path testing
 - Firewall bypass testing (authorized)
 - Red team operations (CTF, authorized pentesting)
+
+### Censorship Bypass & Privacy
+
+- **DNS Censorship Bypass**: Access blocked domains through encrypted DNS
+- **Web Censorship Bypass**: Access restricted websites via HTTP/HTTPS proxy
+- **ISP Surveillance Prevention**: Hide browsing and DNS from local network
+- **Geographic Restrictions**: Access region-locked content
+- **Public WiFi Security**: Encrypt all traffic on untrusted networks
+- **Educational Access**: Bypass content filters for research and learning
+- **Privacy Protection**: Anonymous browsing through remote server
 
 ### Education & Training
 
@@ -896,6 +1168,7 @@ Kerr is built on the shoulders of giants:
 - **[Ratatui](https://ratatui.rs/)** - Terminal UI framework
 - **[Tokio](https://tokio.rs/)** - Asynchronous runtime for Rust
 - **[Axum](https://github.com/tokio-rs/axum)** - Web framework for the UI
+- **[simple-dns](https://crates.io/crates/simple-dns)** - DNS packet parsing and building
 
 ## Contributing
 
