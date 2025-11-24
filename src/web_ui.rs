@@ -1288,6 +1288,56 @@ async fn create_port_forward(
         // Track TCP connections with stream_ids
         let next_stream_id = Arc::new(Mutex::new(1u32));
 
+        // Create demux channels map: stream_id -> channel for routing responses
+        let demux_channels: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Spawn demux task to read from QUIC and route to TCP connections
+        let recv_for_demux = Arc::clone(&recv);
+        let demux_channels_for_task = Arc::clone(&demux_channels);
+        let session_id_for_demux = session_id.clone();
+        tokio::spawn(async move {
+            println!("[PORT_FORWARD] Demux task started for session {}", session_id_for_demux);
+            loop {
+                // Read envelope from QUIC stream
+                let envelope = {
+                    let mut recv_lock = recv_for_demux.lock().await;
+                    match crate::recv_envelope(&mut *recv_lock).await {
+                        Ok(env) => env,
+                        Err(e) => {
+                            eprintln!("[PORT_FORWARD] Demux task: failed to receive envelope: {}", e);
+                            break;
+                        }
+                    }
+                };
+
+                // Route message based on type and stream_id
+                match envelope.payload {
+                    crate::MessagePayload::Server(crate::ServerMessage::TcpDataResponse { stream_id, data }) => {
+                        println!("[PORT_FORWARD] Demux: received {} bytes for stream_id={}", data.len(), stream_id);
+                        let channels_lock = demux_channels_for_task.lock().await;
+                        if let Some(tx) = channels_lock.get(&stream_id) {
+                            if tx.send(data).is_err() {
+                                eprintln!("[PORT_FORWARD] Demux: failed to send to stream_id={} (channel closed)", stream_id);
+                            }
+                        } else {
+                            eprintln!("[PORT_FORWARD] Demux: no handler for stream_id={}", stream_id);
+                        }
+                    }
+                    crate::MessagePayload::Server(crate::ServerMessage::TcpCloseResponse { stream_id, error }) => {
+                        println!("[PORT_FORWARD] Demux: received TcpClose for stream_id={}, error={:?}", stream_id, error);
+                        // Close the channel by dropping the sender
+                        let mut channels_lock = demux_channels_for_task.lock().await;
+                        channels_lock.remove(&stream_id);
+                    }
+                    _ => {
+                        eprintln!("[PORT_FORWARD] Demux: unexpected message type");
+                    }
+                }
+            }
+            println!("[PORT_FORWARD] Demux task ended for session {}", session_id_for_demux);
+        });
+
         loop {
             tokio::select! {
                 // Accept new TCP connection
@@ -1349,10 +1399,21 @@ async fn create_port_forward(
 
                             println!("[PORT_FORWARD] Remote connection established for stream_id={}", stream_id);
 
+                            // Create channel for this TCP connection to receive data from the demux task
+                            let (data_tx, mut data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+                            // Register this stream_id with the demux channels
+                            {
+                                let mut demux_lock = demux_channels.lock().await;
+                                demux_lock.insert(stream_id, data_tx);
+                                println!("[PORT_FORWARD] Registered stream_id={} with demux (total streams: {})",
+                                    stream_id, demux_lock.len());
+                            }
+
                             // Spawn task to handle this TCP connection bidirectionally
                             let send_clone = Arc::clone(&send);
-                            let recv_clone = Arc::clone(&recv);
                             let session_id_clone = session_id.clone();
+                            let demux_channels_clone = Arc::clone(&demux_channels);
                             tokio::spawn(async move {
                                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1366,8 +1427,12 @@ async fn create_port_forward(
                                         let mut buf = vec![0u8; 8192];
                                         loop {
                                             match tcp_read.read(&mut buf).await {
-                                                Ok(0) => break,  // EOF
+                                                Ok(0) => {
+                                                    println!("[PORT_FORWARD] TCP EOF for stream_id={}", stream_id);
+                                                    break;
+                                                },  // EOF
                                                 Ok(n) => {
+                                                    println!("[PORT_FORWARD] Read {} bytes from local TCP stream_id={}", n, stream_id);
                                                     let data_msg = crate::MessageEnvelope {
                                                         session_id: session_id_for_task.clone(),
                                                         payload: crate::MessagePayload::Client(crate::ClientMessage::TcpData {
@@ -1377,14 +1442,19 @@ async fn create_port_forward(
                                                     };
                                                     let mut send_lock = send_for_task.lock().await;
                                                     if crate::send_envelope(&mut *send_lock, &data_msg).await.is_err() {
+                                                        eprintln!("[PORT_FORWARD] Failed to send data for stream_id={}", stream_id);
                                                         break;
                                                     }
                                                 }
-                                                Err(_) => break,
+                                                Err(e) => {
+                                                    eprintln!("[PORT_FORWARD] TCP read error for stream_id={}: {}", stream_id, e);
+                                                    break;
+                                                }
                                             }
                                         }
 
                                         // Send TcpClose
+                                        println!("[PORT_FORWARD] Sending TcpClose for stream_id={}", stream_id);
                                         let close_msg = crate::MessageEnvelope {
                                             session_id: session_id_for_task.clone(),
                                             payload: crate::MessagePayload::Client(crate::ClientMessage::TcpClose {
@@ -1396,39 +1466,34 @@ async fn create_port_forward(
                                     })
                                 };
 
-                                // Task to receive from QUIC and write to local TCP
+                                // Task to receive from our dedicated channel and write to local TCP
                                 let recv_task = tokio::spawn(async move {
-                                    loop {
-                                        let envelope = {
-                                            let mut recv_lock = recv_clone.lock().await;
-                                            match crate::recv_envelope(&mut *recv_lock).await {
-                                                Ok(env) => env,
-                                                Err(_) => break,
-                                            }
-                                        };
-
-                                        match envelope.payload {
-                                            crate::MessagePayload::Server(crate::ServerMessage::TcpDataResponse { stream_id: resp_id, data }) => {
-                                                if resp_id == stream_id {
-                                                    if tcp_write.write_all(&data).await.is_err() {
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            crate::MessagePayload::Server(crate::ServerMessage::TcpCloseResponse { stream_id: resp_id, .. }) => {
-                                                if resp_id == stream_id {
-                                                    break;
-                                                }
-                                            }
-                                            _ => {}
+                                    while let Some(data) = data_rx.recv().await {
+                                        println!("[PORT_FORWARD] Writing {} bytes to local TCP stream_id={}", data.len(), stream_id);
+                                        if tcp_write.write_all(&data).await.is_err() {
+                                            eprintln!("[PORT_FORWARD] Failed to write to local TCP stream_id={}", stream_id);
+                                            break;
                                         }
                                     }
+                                    println!("[PORT_FORWARD] Recv task ended for stream_id={}", stream_id);
                                 });
 
                                 // Wait for either task to complete
                                 tokio::select! {
-                                    _ = send_task => {}
-                                    _ = recv_task => {}
+                                    _ = send_task => {
+                                        println!("[PORT_FORWARD] Send task completed for stream_id={}", stream_id);
+                                    }
+                                    _ = recv_task => {
+                                        println!("[PORT_FORWARD] Recv task completed for stream_id={}", stream_id);
+                                    }
+                                }
+
+                                // Cleanup: remove from demux channels
+                                {
+                                    let mut demux_lock = demux_channels_clone.lock().await;
+                                    demux_lock.remove(&stream_id);
+                                    println!("[PORT_FORWARD] Unregistered stream_id={} from demux (remaining: {})",
+                                        stream_id, demux_lock.len());
                                 }
 
                                 println!("[PORT_FORWARD] Connection closed for stream_id={}", stream_id);
