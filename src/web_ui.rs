@@ -1292,9 +1292,14 @@ async fn create_port_forward(
         let demux_channels: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        // Create pending open responses map: stream_id -> oneshot channel for TcpOpenResponse
+        let pending_opens: Arc<Mutex<HashMap<u32, tokio::sync::oneshot::Sender<(bool, Option<String>)>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         // Spawn demux task to read from QUIC and route to TCP connections
         let recv_for_demux = Arc::clone(&recv);
         let demux_channels_for_task = Arc::clone(&demux_channels);
+        let pending_opens_for_task = Arc::clone(&pending_opens);
         let session_id_for_demux = session_id.clone();
         tokio::spawn(async move {
             println!("[PORT_FORWARD] Demux task started for session {}", session_id_for_demux);
@@ -1313,6 +1318,15 @@ async fn create_port_forward(
 
                 // Route message based on type and stream_id
                 match envelope.payload {
+                    crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse { stream_id, success, error }) => {
+                        println!("[PORT_FORWARD] Demux: received TcpOpenResponse for stream_id={}, success={}", stream_id, success);
+                        let mut pending_lock = pending_opens_for_task.lock().await;
+                        if let Some(tx) = pending_lock.remove(&stream_id) {
+                            let _ = tx.send((success, error));
+                        } else {
+                            eprintln!("[PORT_FORWARD] Demux: no pending open for stream_id={}", stream_id);
+                        }
+                    }
                     crate::MessagePayload::Server(crate::ServerMessage::TcpDataResponse { stream_id, data }) => {
                         println!("[PORT_FORWARD] Demux: received {} bytes for stream_id={}", data.len(), stream_id);
                         let channels_lock = demux_channels_for_task.lock().await;
@@ -1331,7 +1345,7 @@ async fn create_port_forward(
                         channels_lock.remove(&stream_id);
                     }
                     _ => {
-                        eprintln!("[PORT_FORWARD] Demux: unexpected message type");
+                        eprintln!("[PORT_FORWARD] Demux: unexpected message type: {:?}", envelope.payload);
                     }
                 }
             }
@@ -1354,6 +1368,13 @@ async fn create_port_forward(
                             println!("[PORT_FORWARD] Accepted connection on local port {}, forwarding to remote port {} (stream_id={})",
                                 local_port_for_task, remote_port, stream_id);
 
+                            // Create oneshot channel for TcpOpenResponse
+                            let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+                            {
+                                let mut pending_lock = pending_opens.lock().await;
+                                pending_lock.insert(stream_id, open_tx);
+                            }
+
                             // Send TcpOpen message
                             let open_msg = crate::MessageEnvelope {
                                 session_id: session_id.clone(),
@@ -1363,38 +1384,31 @@ async fn create_port_forward(
                                     destination_port: remote_port,
                                 }),
                             };
-                            {
+                            let send_ok = {
                                 let mut send_lock = send.lock().await;
-                                if let Err(e) = crate::send_envelope(&mut *send_lock, &open_msg).await {
-                                    eprintln!("[PORT_FORWARD] Failed to send TcpOpen: {}", e);
-                                    continue;
-                                }
+                                crate::send_envelope(&mut *send_lock, &open_msg).await.is_ok()
+                            };
+
+                            if !send_ok {
+                                eprintln!("[PORT_FORWARD] Failed to send TcpOpen for stream_id={}", stream_id);
+                                // Remove from pending_opens
+                                pending_opens.lock().await.remove(&stream_id);
+                                continue;
                             }
 
-                            // Wait for TcpOpenResponse
-                            let open_response = {
-                                let mut recv_lock = recv.lock().await;
-                                match crate::recv_envelope(&mut *recv_lock).await {
-                                    Ok(envelope) => envelope,
-                                    Err(e) => {
-                                        eprintln!("[PORT_FORWARD] Failed to receive TcpOpenResponse: {}", e);
-                                        continue;
-                                    }
+                            // Wait for TcpOpenResponse via oneshot channel
+                            let (success, error) = match open_rx.await {
+                                Ok(response) => response,
+                                Err(e) => {
+                                    eprintln!("[PORT_FORWARD] Failed to receive TcpOpenResponse: {}", e);
+                                    continue;
                                 }
                             };
 
                             // Check if connection was successful
-                            match open_response.payload {
-                                crate::MessagePayload::Server(crate::ServerMessage::TcpOpenResponse { success, error, .. }) => {
-                                    if !success {
-                                        eprintln!("[PORT_FORWARD] Remote connection failed: {:?}", error);
-                                        continue;
-                                    }
-                                }
-                                _ => {
-                                    eprintln!("[PORT_FORWARD] Unexpected response to TcpOpen");
-                                    continue;
-                                }
+                            if !success {
+                                eprintln!("[PORT_FORWARD] Remote connection failed: {:?}", error);
+                                continue;
                             }
 
                             println!("[PORT_FORWARD] Remote connection established for stream_id={}", stream_id);
