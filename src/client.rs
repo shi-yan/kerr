@@ -716,6 +716,7 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
 pub async fn browse_remote(connection_string: String) -> Result<()> {
     use std::sync::Arc;
     use std::path::PathBuf;
+    use rand::Rng;
 
     // Decode connection string
     let addr = crate::decode_connection_string(&connection_string)
@@ -727,26 +728,28 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
 
     let (mut send, recv) = conn.open_bi().await.e()?;
 
-    // Send Hello message with FileBrowser session type
+    // Generate a unique session ID for this browser session
+    let session_id = format!("browser_{}", rand::rng().random::<u64>());
+
+    // Send Hello message using the multiplexed protocol
     let hello = ClientMessage::Hello {
         session_type: crate::SessionType::FileBrowser,
     };
-
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     println!("Connected! Starting file browser...");
 
     // Create RemoteFilesystem
     use crate::custom_explorer::filesystem::RemoteFilesystem;
-    let remote_fs = Arc::new(RemoteFilesystem::new(
+    let remote_fs = Arc::new(RemoteFilesystem::new_with_session_id(
         PathBuf::from("/"),
         send,
         recv,
+        session_id,
     ));
 
     // Run the browser with remote filesystem
