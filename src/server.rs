@@ -1944,7 +1944,11 @@ impl KerrServer {
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<crate::ClientMessage>,
         outgoing: tokio::sync::mpsc::UnboundedSender<crate::MessageEnvelope>,
     ) -> Result<(), AcceptError> {
+        use std::path::Path;
+
         tracing::info!(session_id = %session_id, "File transfer session started (mux mode)");
+
+        let config = bincode::config::standard();
 
         // Process incoming messages
         while let Some(msg) = incoming.recv().await {
@@ -1955,6 +1959,119 @@ impl KerrServer {
                         payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
                     };
                     let _ = outgoing.send(response);
+                }
+                crate::ClientMessage::RequestDownload { path } => {
+                    tracing::info!(session_id = %session_id, path = %path, "Client requested download");
+
+                    // Check if path exists
+                    let file_path = Path::new(&path);
+                    if !file_path.exists() {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: format!("Path does not exist: {}", path),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    }
+
+                    let is_dir = file_path.is_dir();
+
+                    // Calculate total size
+                    let total_size = match crate::transfer::calculate_size(file_path) {
+                        Ok(size) => size,
+                        Err(e) => {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to calculate size: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            continue;
+                        }
+                    };
+
+                    tracing::info!(session_id = %session_id, path = %path, size = total_size, is_dir = is_dir,
+                        "Sending file");
+
+                    // Send StartDownload message
+                    let response = crate::MessageEnvelope {
+                        session_id: session_id.clone(),
+                        payload: crate::MessagePayload::Server(crate::ServerMessage::StartDownload {
+                            size: total_size,
+                            is_dir,
+                        }),
+                    };
+                    let _ = outgoing.send(response);
+
+                    // Get all files to send
+                    let files = match crate::transfer::get_files_recursive(file_path) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to read files: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            continue;
+                        }
+                    };
+
+                    // Send file chunks
+                    use std::io::Read;
+                    let mut bytes_sent = 0u64;
+
+                    for file in files {
+                        let mut f = match std::fs::File::open(&file) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                    "Failed to open file");
+                                continue;
+                            }
+                        };
+
+                        let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
+
+                        loop {
+                            let n = match f.read(&mut buffer) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                        "Failed to read file");
+                                    break;
+                                }
+                            };
+
+                            if n == 0 {
+                                break;
+                            }
+
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::FileChunk {
+                                    data: buffer[..n].to_vec(),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+
+                            bytes_sent += n as u64;
+                        }
+                    }
+
+                    // Send EndDownload message
+                    let response = crate::MessageEnvelope {
+                        session_id: session_id.clone(),
+                        payload: crate::MessagePayload::Server(crate::ServerMessage::EndDownload),
+                    };
+                    let _ = outgoing.send(response);
+
+                    tracing::info!(session_id = %session_id, path = %path, bytes_sent = bytes_sent,
+                        "Download completed");
                 }
                 crate::ClientMessage::Disconnect => break,
                 _ => {}
