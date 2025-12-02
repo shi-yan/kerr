@@ -77,6 +77,8 @@ fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
 }
 
 pub async fn run_client(connection_string: String) -> Result<()> {
+    use rand::Rng;
+
     // Decode the compressed connection string (base64 -> gzip -> JSON -> NodeAddr)
     let addr = crate::decode_connection_string(&connection_string)
         .expect("Failed to decode connection string");
@@ -94,46 +96,45 @@ pub async fn run_client(connection_string: String) -> Result<()> {
     // Open a bidirectional QUIC stream
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
-    // Send Hello message to indicate this is a shell session
-    let config = config::standard();
+    // Generate a unique session ID for this shell session
+    let session_id = format!("shell_{}", rand::rng().random::<u64>());
+    let session_id_for_send = session_id.clone();
+
+    // Send Hello message using the multiplexed protocol
     let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::Shell };
-    if let Ok(encoded) = bincode::encode_to_vec(&hello_msg, config) {
-        let len = (encoded.len() as u32).to_be_bytes();
-        send.write_all(&len).await.e()?;
-        send.write_all(&encoded).await.e()?;
-    }
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello_msg),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Enter raw mode
     terminal::enable_raw_mode().expect("Failed to enable raw mode");
     let mut stdout = io::stdout();
     stdout.execute(terminal::Clear(ClearType::All)).unwrap();
 
-    // Send initial terminal size
-    let config = config::standard();
+    // Send initial terminal size using the multiplexed protocol
     if let Ok((cols, rows)) = terminal::size() {
         let resize_msg = ClientMessage::Resize { cols, rows };
-        if let Ok(encoded) = bincode::encode_to_vec(&resize_msg, config) {
-            let len = (encoded.len() as u32).to_be_bytes();
-            send.write_all(&len).await.e().ok();
-            send.write_all(&encoded).await.e().ok();
-        }
+        let resize_envelope = crate::MessageEnvelope {
+            session_id: session_id.clone(),
+            payload: crate::MessagePayload::Client(resize_msg),
+        };
+        let _ = crate::send_envelope(&mut send, &resize_envelope).await;
     }
 
     // Channel to send messages to the server
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
 
-    // Spawn task to write messages to send stream
+    // Spawn task to write messages to send stream using the multiplexed protocol
     let send_task = tokio::spawn(async move {
-        let config = config::standard();
         while let Some(msg) = msg_rx.recv().await {
-            if let Ok(encoded) = bincode::encode_to_vec(&msg, config) {
-                let len = (encoded.len() as u32).to_be_bytes();
-                if send.write_all(&len).await.is_err() {
-                    break;
-                }
-                if send.write_all(&encoded).await.is_err() {
-                    break;
-                }
+            let envelope = crate::MessageEnvelope {
+                session_id: session_id_for_send.clone(),
+                payload: crate::MessagePayload::Client(msg),
+            };
+            if crate::send_envelope(&mut send, &envelope).await.is_err() {
+                break;
             }
         }
     });
@@ -175,27 +176,17 @@ pub async fn run_client(connection_string: String) -> Result<()> {
     // Main task: receive output from server and display
     let output_task = tokio::spawn(async move {
         let mut stdout = io::stdout();
-        let config = config::standard();
         loop {
-            // Read message length (4 bytes)
-            let mut len_bytes = [0u8; 4];
-            match recv.read_exact(&mut len_bytes).await {
-                Ok(_) => {},
+            // Receive message using the multiplexed protocol
+            let envelope = match crate::recv_envelope(&mut recv).await {
+                Ok(env) => env,
                 Err(_) => break, // Connection closed
-            }
-            let len = u32::from_be_bytes(len_bytes) as usize;
+            };
 
-            // Read message data
-            let mut msg_bytes = vec![0u8; len];
-            match recv.read_exact(&mut msg_bytes).await {
-                Ok(_) => {},
-                Err(_) => break,
-            }
-
-            // Deserialize message
-            let msg: ServerMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                Ok((m, _)) => m,
-                Err(_) => continue,
+            // Extract server message from envelope
+            let msg = match envelope.payload {
+                crate::MessagePayload::Server(server_msg) => server_msg,
+                _ => continue, // Ignore non-server messages
             };
 
             match msg {
@@ -776,6 +767,7 @@ pub async fn run_tcp_relay(
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use rand::Rng;
 
     // Decode connection string and connect to server
     let node_addr = crate::decode_connection_string(connection_string)
@@ -793,17 +785,19 @@ pub async fn run_tcp_relay(
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
 
-    // Send Hello message with TcpRelay session type
+    // Generate a unique session ID for this relay session
+    let session_id = format!("relay_{}", rand::rng().random::<u64>());
+    let session_id_for_send = session_id.clone();
+
+    // Send Hello message using the multiplexed protocol
     let hello = crate::ClientMessage::Hello {
         session_type: crate::SessionType::TcpRelay,
     };
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config)
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
-    send.write_all(&encoded).await
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
 
     // Traffic counters
@@ -837,24 +831,16 @@ pub async fn run_tcp_relay(
     let download_bytes_recv = Arc::clone(&download_bytes);
     let recv_task = tokio::spawn(async move {
         loop {
-            // Read message length
-            let mut len_bytes = [0u8; 4];
-            if let Err(_) = recv.read_exact(&mut len_bytes).await {
-                break;
-            }
-            let msg_len = u32::from_be_bytes(len_bytes) as usize;
-
-            // Read message
-            let mut msg_bytes = vec![0u8; msg_len];
-            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
-                break;
-            }
-
-            // Decode message
-            let config = bincode::config::standard();
-            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
-                Ok(m) => m,
+            // Receive message using the multiplexed protocol
+            let envelope = match crate::recv_envelope(&mut recv).await {
+                Ok(env) => env,
                 Err(_) => break,
+            };
+
+            // Extract server message from envelope
+            let msg = match envelope.payload {
+                crate::MessagePayload::Server(server_msg) => server_msg,
+                _ => continue,
             };
 
             // Handle server messages
@@ -907,29 +893,20 @@ pub async fn run_tcp_relay(
             current
         };
 
-        // Send TcpOpen message
+        // Send TcpOpen message using the multiplexed protocol
         let open_msg = crate::ClientMessage::TcpOpen {
             stream_id,
             destination_host: None,  // Connect to localhost on remote server
             destination_port: remote_port,
         };
-        let config = bincode::config::standard();
-        let encoded = match bincode::encode_to_vec(&open_msg, config) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("Failed to encode TcpOpen: {}", e);
-                continue;
-            }
+        let open_envelope = crate::MessageEnvelope {
+            session_id: session_id_for_send.clone(),
+            payload: crate::MessagePayload::Client(open_msg),
         };
-        let len = (encoded.len() as u32).to_be_bytes();
 
         {
             let mut send_locked = send_clone.lock().await;
-            if let Err(e) = send_locked.write_all(&len).await {
-                eprintln!("Failed to send length: {}", e);
-                break;
-            }
-            if let Err(e) = send_locked.write_all(&encoded).await {
+            if let Err(e) = crate::send_envelope(&mut *send_locked, &open_envelope).await {
                 eprintln!("Failed to send TcpOpen: {}", e);
                 break;
             }
@@ -942,6 +919,7 @@ pub async fn run_tcp_relay(
         let send_for_task = Arc::clone(&send_clone);
         let tcp_connections_for_task = Arc::clone(&tcp_connections);
         let upload_bytes_task = Arc::clone(&upload_bytes);
+        let session_id_for_task = session_id_for_send.clone();
 
         // Spawn task to handle this TCP connection
         tokio::spawn(async move {
@@ -951,6 +929,7 @@ pub async fn run_tcp_relay(
             let send_task = {
                 let send_for_read = Arc::clone(&send_for_task);
                 let upload_bytes_send = Arc::clone(&upload_bytes_task);
+                let session_id_for_read = session_id_for_task.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 65536];
                     loop {
@@ -960,23 +939,18 @@ pub async fn run_tcp_relay(
                                 // Track upload bytes
                                 upload_bytes_send.fetch_add(n as u64, Ordering::Relaxed);
 
-                                // Send data to remote
+                                // Send data to remote using the multiplexed protocol
                                 let data_msg = crate::ClientMessage::TcpData {
                                     stream_id,
                                     data: buf[..n].to_vec(),
                                 };
-                                let config = bincode::config::standard();
-                                let encoded = match bincode::encode_to_vec(&data_msg, config) {
-                                    Ok(e) => e,
-                                    Err(_) => break,
+                                let data_envelope = crate::MessageEnvelope {
+                                    session_id: session_id_for_read.clone(),
+                                    payload: crate::MessagePayload::Client(data_msg),
                                 };
-                                let len = (encoded.len() as u32).to_be_bytes();
 
                                 let mut send_locked = send_for_read.lock().await;
-                                if send_locked.write_all(&len).await.is_err() {
-                                    break;
-                                }
-                                if send_locked.write_all(&encoded).await.is_err() {
+                                if crate::send_envelope(&mut *send_locked, &data_envelope).await.is_err() {
                                     break;
                                 }
                             }
@@ -1001,15 +975,14 @@ pub async fn run_tcp_relay(
                 _ = write_task => {}
             }
 
-            // Send TcpClose message
+            // Send TcpClose message using the multiplexed protocol
             let close_msg = crate::ClientMessage::TcpClose { stream_id };
-            let config = bincode::config::standard();
-            if let Ok(encoded) = bincode::encode_to_vec(&close_msg, config) {
-                let len = (encoded.len() as u32).to_be_bytes();
-                let mut send_locked = send_for_task.lock().await;
-                let _ = send_locked.write_all(&len).await;
-                let _ = send_locked.write_all(&encoded).await;
-            }
+            let close_envelope = crate::MessageEnvelope {
+                session_id: session_id_for_task.clone(),
+                payload: crate::MessagePayload::Client(close_msg),
+            };
+            let mut send_locked = send_for_task.lock().await;
+            let _ = crate::send_envelope(&mut *send_locked, &close_envelope).await;
 
             // Remove from connections map
             tcp_connections_for_task.lock().await.remove(&stream_id);
@@ -1040,6 +1013,7 @@ pub async fn run_proxy(
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use rand::Rng;
 
     // Decode connection string and connect to server
     let node_addr = crate::decode_connection_string(connection_string)
@@ -1069,17 +1043,19 @@ pub async fn run_proxy(
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to open stream: {}", e)))?;
 
-    // Send Hello message with HttpProxy session type
+    // Generate a unique session ID for this proxy session
+    let session_id = format!("proxy_{}", rand::rng().random::<u64>());
+    let session_id_for_send = session_id.clone();
+
+    // Send Hello message using the multiplexed protocol
     let hello = crate::ClientMessage::Hello {
         session_type: crate::SessionType::HttpProxy,
     };
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config)
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send length: {}", e)))?;
-    send.write_all(&encoded).await
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to send hello: {}", e)))?;
 
     // Listen on local port
@@ -1106,24 +1082,16 @@ pub async fn run_proxy(
     let tcp_connections_clone = Arc::clone(&tcp_connections);
     let _recv_task = tokio::spawn(async move {
         loop {
-            // Read message length
-            let mut len_bytes = [0u8; 4];
-            if let Err(_) = recv.read_exact(&mut len_bytes).await {
-                break;
-            }
-            let msg_len = u32::from_be_bytes(len_bytes) as usize;
-
-            // Read message
-            let mut msg_bytes = vec![0u8; msg_len];
-            if let Err(_) = recv.read_exact(&mut msg_bytes).await {
-                break;
-            }
-
-            // Decode message
-            let config = bincode::config::standard();
-            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
-                Ok(m) => m,
+            // Receive message using the multiplexed protocol
+            let envelope = match crate::recv_envelope(&mut recv).await {
+                Ok(env) => env,
                 Err(_) => break,
+            };
+
+            // Extract server message from envelope
+            let msg = match envelope.payload {
+                crate::MessagePayload::Server(server_msg) => server_msg,
+                _ => continue,
             };
 
             // Handle server messages
@@ -1168,6 +1136,7 @@ pub async fn run_proxy(
         let send_for_task = Arc::clone(&send_clone);
         let tcp_connections_for_task = Arc::clone(&tcp_connections);
         let next_stream_id_for_task = Arc::clone(&next_stream_id);
+        let session_id_for_task = session_id_for_send.clone();
 
         // Spawn task to handle this HTTP connection
         tokio::spawn(async move {
@@ -1236,29 +1205,20 @@ pub async fn run_proxy(
             // Get next stream ID
             let stream_id = next_stream_id_for_task.fetch_add(1, Ordering::Relaxed);
 
-            // Send TcpOpen message with the target host
+            // Send TcpOpen message using the multiplexed protocol
             let open_msg = crate::ClientMessage::TcpOpen {
                 stream_id,
                 destination_host: Some(target_host),
                 destination_port: target_port,
             };
-            let config = bincode::config::standard();
-            let encoded = match bincode::encode_to_vec(&open_msg, config) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("Failed to encode TcpOpen: {}", e);
-                    return;
-                }
+            let open_envelope = crate::MessageEnvelope {
+                session_id: session_id_for_task.clone(),
+                payload: crate::MessagePayload::Client(open_msg),
             };
-            let len = (encoded.len() as u32).to_be_bytes();
 
             {
                 let mut send_locked = send_for_task.lock().await;
-                if let Err(e) = send_locked.write_all(&len).await {
-                    eprintln!("Failed to send length: {}", e);
-                    return;
-                }
-                if let Err(e) = send_locked.write_all(&encoded).await {
+                if let Err(e) = crate::send_envelope(&mut *send_locked, &open_envelope).await {
                     eprintln!("Failed to send TcpOpen: {}", e);
                     return;
                 }
@@ -1275,23 +1235,18 @@ pub async fn run_proxy(
                     return;
                 }
             } else {
-                // For HTTP, send the original request to the remote server
+                // For HTTP, send the original request to the remote server using the multiplexed protocol
                 let data_msg = crate::ClientMessage::TcpData {
                     stream_id,
                     data: buffer[..bytes_read].to_vec(),
                 };
-                let config = bincode::config::standard();
-                let encoded = match bincode::encode_to_vec(&data_msg, config) {
-                    Ok(e) => e,
-                    Err(_) => return,
+                let data_envelope = crate::MessageEnvelope {
+                    session_id: session_id_for_task.clone(),
+                    payload: crate::MessagePayload::Client(data_msg),
                 };
-                let len = (encoded.len() as u32).to_be_bytes();
 
                 let mut send_locked = send_for_task.lock().await;
-                if send_locked.write_all(&len).await.is_err() {
-                    return;
-                }
-                if send_locked.write_all(&encoded).await.is_err() {
+                if crate::send_envelope(&mut *send_locked, &data_envelope).await.is_err() {
                     return;
                 }
                 drop(send_locked);
@@ -1302,29 +1257,25 @@ pub async fn run_proxy(
             // Task to read from client and send to remote
             let send_task = {
                 let send_for_read = Arc::clone(&send_for_task);
+                let session_id_for_read = session_id_for_task.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 65536];
                     loop {
                         match client_read.read(&mut buf).await {
                             Ok(0) => break, // EOF
                             Ok(n) => {
-                                // Send data to remote
+                                // Send data to remote using the multiplexed protocol
                                 let data_msg = crate::ClientMessage::TcpData {
                                     stream_id,
                                     data: buf[..n].to_vec(),
                                 };
-                                let config = bincode::config::standard();
-                                let encoded = match bincode::encode_to_vec(&data_msg, config) {
-                                    Ok(e) => e,
-                                    Err(_) => break,
+                                let data_envelope = crate::MessageEnvelope {
+                                    session_id: session_id_for_read.clone(),
+                                    payload: crate::MessagePayload::Client(data_msg),
                                 };
-                                let len = (encoded.len() as u32).to_be_bytes();
 
                                 let mut send_locked = send_for_read.lock().await;
-                                if send_locked.write_all(&len).await.is_err() {
-                                    break;
-                                }
-                                if send_locked.write_all(&encoded).await.is_err() {
+                                if crate::send_envelope(&mut *send_locked, &data_envelope).await.is_err() {
                                     break;
                                 }
                             }
@@ -1349,15 +1300,14 @@ pub async fn run_proxy(
                 _ = write_task => {}
             }
 
-            // Send TcpClose message
+            // Send TcpClose message using the multiplexed protocol
             let close_msg = crate::ClientMessage::TcpClose { stream_id };
-            let config = bincode::config::standard();
-            if let Ok(encoded) = bincode::encode_to_vec(&close_msg, config) {
-                let len = (encoded.len() as u32).to_be_bytes();
-                let mut send_locked = send_for_task.lock().await;
-                let _ = send_locked.write_all(&len).await;
-                let _ = send_locked.write_all(&encoded).await;
-            }
+            let close_envelope = crate::MessageEnvelope {
+                session_id: session_id_for_task.clone(),
+                payload: crate::MessagePayload::Client(close_msg),
+            };
+            let mut send_locked = send_for_task.lock().await;
+            let _ = crate::send_envelope(&mut *send_locked, &close_envelope).await;
 
             // Remove from connections map
             tcp_connections_for_task.lock().await.remove(&stream_id);
