@@ -292,6 +292,7 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     use std::fs;
     use indicatif::{ProgressBar, ProgressStyle};
     use crate::transfer::{calculate_size, get_files_recursive, CHUNK_SIZE};
+    use rand::Rng;
 
     // Decode the compressed connection string (base64 -> gzip -> JSON)
     let addr = crate::decode_connection_string(&connection_string)
@@ -302,13 +303,16 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
-    // Send Hello message to indicate this is a file transfer session
-    let config = config::standard();
+    // Generate a unique session ID for this file transfer
+    let session_id = format!("send_{}", rand::rng().random::<u64>());
+
+    // Send Hello message using the multiplexed protocol
     let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::FileTransfer };
-    let encoded = bincode::encode_to_vec(&hello_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello_msg),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     let local = Path::new(&local_path);
     let is_dir = local.is_dir();
@@ -338,31 +342,25 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     let total_size = calculate_size(local)
         .expect("Failed to calculate file size");
 
-    // Send upload start message
+    // Send upload start message using the multiplexed protocol
     let start_msg = ClientMessage::StartUpload {
         path: actual_remote_path.clone(),
         size: total_size,
         is_dir,
         force,
     };
-    let config = config::standard();
-    let encoded = bincode::encode_to_vec(&start_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let start_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(start_msg),
+    };
+    crate::send_envelope(&mut send, &start_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Wait for ack or error
-    let mut len_bytes = [0u8; 4];
-    recv.read_exact(&mut len_bytes).await.e()?;
-    let msg_len = u32::from_be_bytes(len_bytes) as usize;
-    let mut msg_bytes = vec![0u8; msg_len];
-    recv.read_exact(&mut msg_bytes).await.e()?;
+    let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Check if we got UploadAck, ConfirmPrompt, or Error
-    let (response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-        .expect("Failed to decode server response");
-
-    match response {
+    match response_envelope.payload {
+        crate::MessagePayload::Server(response) => match response {
         ServerMessage::UploadAck => {
             // Good to proceed
         }
@@ -376,12 +374,13 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
             stdin().read_line(&mut input).unwrap();
             let confirmed = input.trim().eq_ignore_ascii_case("y");
 
-            // Send confirmation response
+            // Send confirmation response using the multiplexed protocol
             let confirm_msg = ClientMessage::ConfirmResponse { confirmed };
-            let encoded = bincode::encode_to_vec(&confirm_msg, config).unwrap();
-            let len = (encoded.len() as u32).to_be_bytes();
-            send.write_all(&len).await.e()?;
-            send.write_all(&encoded).await.e()?;
+            let confirm_envelope = crate::MessageEnvelope {
+                session_id: session_id.clone(),
+                payload: crate::MessagePayload::Client(confirm_msg),
+            };
+            crate::send_envelope(&mut send, &confirm_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
             if !confirmed {
                 println!("Upload cancelled.");
@@ -389,20 +388,13 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
             }
 
             // Wait for final ack after confirmation
-            let mut len_bytes = [0u8; 4];
-            recv.read_exact(&mut len_bytes).await.e()?;
-            let msg_len = u32::from_be_bytes(len_bytes) as usize;
-            let mut msg_bytes = vec![0u8; msg_len];
-            recv.read_exact(&mut msg_bytes).await.e()?;
+            let final_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
-            let (final_response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-                .expect("Failed to decode server response");
-
-            match final_response {
-                ServerMessage::UploadAck => {
+            match final_envelope.payload {
+                crate::MessagePayload::Server(ServerMessage::UploadAck) => {
                     // Good to proceed
                 }
-                ServerMessage::Error { message } => {
+                crate::MessagePayload::Server(ServerMessage::Error { message }) => {
                     eprintln!("Server error: {}", message);
                     return Ok(());
                 }
@@ -418,6 +410,11 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
         }
         _ => {
             eprintln!("Unexpected server response");
+            return Ok(());
+        }
+        }
+        _ => {
+            eprintln!("Unexpected message type");
             return Ok(());
         }
     }
@@ -447,25 +444,28 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
                 break;
             }
 
+            // Send chunk using the multiplexed protocol
             let chunk_msg = ClientMessage::FileChunk {
                 data: buffer[..n].to_vec(),
             };
-            let encoded = bincode::encode_to_vec(&chunk_msg, config).unwrap();
-            let len = (encoded.len() as u32).to_be_bytes();
-            send.write_all(&len).await.e()?;
-            send.write_all(&encoded).await.e()?;
+            let chunk_envelope = crate::MessageEnvelope {
+                session_id: session_id.clone(),
+                payload: crate::MessagePayload::Client(chunk_msg),
+            };
+            crate::send_envelope(&mut send, &chunk_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
             bytes_sent += n as u64;
             pb.set_position(bytes_sent);
         }
     }
 
-    // Send end message
+    // Send end message using the multiplexed protocol
     let end_msg = ClientMessage::EndUpload;
-    let encoded = bincode::encode_to_vec(&end_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let end_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(end_msg),
+    };
+    crate::send_envelope(&mut send, &end_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     pb.finish_with_message("Upload complete!");
 
@@ -481,6 +481,7 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     use std::fs;
     use std::io::Write;
     use indicatif::{ProgressBar, ProgressStyle};
+    use rand::Rng;
 
     // Decode the compressed connection string (base64 -> gzip -> JSON)
     let addr = crate::decode_connection_string(&connection_string)
@@ -491,36 +492,33 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
-    // Send Hello message to indicate this is a file transfer session
-    let config = config::standard();
-    let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::FileTransfer };
-    let encoded = bincode::encode_to_vec(&hello_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    // Generate a unique session ID for this file transfer
+    let session_id = format!("pull_{}", rand::rng().random::<u64>());
 
-    // Send RequestDownload message
+    // Send Hello message using the multiplexed protocol
+    let hello_msg = ClientMessage::Hello { session_type: crate::SessionType::FileTransfer };
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello_msg),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+
+    // Send RequestDownload message using the multiplexed protocol
     let request_msg = ClientMessage::RequestDownload {
         path: remote_path.clone(),
     };
-    let encoded = bincode::encode_to_vec(&request_msg, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let request_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(request_msg),
+    };
+    crate::send_envelope(&mut send, &request_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Wait for StartDownload or Error
-    let mut len_bytes = [0u8; 4];
-    recv.read_exact(&mut len_bytes).await.e()?;
-    let msg_len = u32::from_be_bytes(len_bytes) as usize;
-    let mut msg_bytes = vec![0u8; msg_len];
-    recv.read_exact(&mut msg_bytes).await.e()?;
+    let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
-    let (response, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-        .expect("Failed to decode server response");
-
-    let (total_size, _is_dir) = match response {
-        ServerMessage::StartDownload { size, is_dir } => (size, is_dir),
-        ServerMessage::Error { message } => {
+    let (total_size, _is_dir) = match response_envelope.payload {
+        crate::MessagePayload::Server(ServerMessage::StartDownload { size, is_dir }) => (size, is_dir),
+        crate::MessagePayload::Server(ServerMessage::Error { message }) => {
             eprintln!("Server error: {}", message);
             return Ok(());
         }
@@ -550,30 +548,22 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
 
     let mut bytes_received = 0u64;
 
-    // Receive file chunks
+    // Receive file chunks using the multiplexed protocol
     loop {
-        // Read message length
-        let mut len_bytes = [0u8; 4];
-        recv.read_exact(&mut len_bytes).await.e()?;
-        let msg_len = u32::from_be_bytes(len_bytes) as usize;
-        let mut msg_bytes = vec![0u8; msg_len];
-        recv.read_exact(&mut msg_bytes).await.e()?;
+        let envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
-        let (msg, _): (ServerMessage, _) = bincode::decode_from_slice(&msg_bytes, config)
-            .expect("Failed to decode server message");
-
-        match msg {
-            ServerMessage::FileChunk { data } => {
+        match envelope.payload {
+            crate::MessagePayload::Server(ServerMessage::FileChunk { data }) => {
                 output_file.write_all(&data)
                     .expect("Failed to write to file");
                 bytes_received += data.len() as u64;
                 pb.set_position(bytes_received);
             }
-            ServerMessage::EndDownload => {
+            crate::MessagePayload::Server(ServerMessage::EndDownload) => {
                 pb.finish_with_message("Download complete!");
                 break;
             }
-            ServerMessage::Error { message } => {
+            crate::MessagePayload::Server(ServerMessage::Error { message }) => {
                 eprintln!("Server error: {}", message);
                 pb.finish_with_message("Download failed");
                 return Ok(());
@@ -726,6 +716,7 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
 pub async fn browse_remote(connection_string: String) -> Result<()> {
     use std::sync::Arc;
     use std::path::PathBuf;
+    use rand::Rng;
 
     // Decode connection string
     let addr = crate::decode_connection_string(&connection_string)
@@ -737,26 +728,28 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
 
     let (mut send, recv) = conn.open_bi().await.e()?;
 
-    // Send Hello message with FileBrowser session type
+    // Generate a unique session ID for this browser session
+    let session_id = format!("browser_{}", rand::rng().random::<u64>());
+
+    // Send Hello message using the multiplexed protocol
     let hello = ClientMessage::Hello {
         session_type: crate::SessionType::FileBrowser,
     };
-
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config).unwrap();
-    let len = (encoded.len() as u32).to_be_bytes();
-
-    send.write_all(&len).await.e()?;
-    send.write_all(&encoded).await.e()?;
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     println!("Connected! Starting file browser...");
 
     // Create RemoteFilesystem
     use crate::custom_explorer::filesystem::RemoteFilesystem;
-    let remote_fs = Arc::new(RemoteFilesystem::new(
+    let remote_fs = Arc::new(RemoteFilesystem::new_with_session_id(
         PathBuf::from("/"),
         send,
         recv,
+        session_id,
     ));
 
     // Run the browser with remote filesystem
