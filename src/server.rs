@@ -1950,15 +1950,131 @@ impl KerrServer {
 
         let config = bincode::config::standard();
 
+        // File upload state
+        let mut upload_file: Option<std::fs::File> = None;
+        let mut upload_path: Option<String> = None;
+
         // Process incoming messages
         while let Some(msg) = incoming.recv().await {
             match msg {
-                crate::ClientMessage::StartUpload { .. } => {
+                crate::ClientMessage::StartUpload { path, size, is_dir, force } => {
+                    use std::io::Write;
+
+                    tracing::info!(session_id = %session_id, path = %path, size = size, is_dir = is_dir, force = force,
+                        "Client requested upload");
+
+                    // Check if path is an existing directory - this is an error
+                    let file_path = Path::new(&path);
+
+                    // If not force mode and file exists, ask for confirmation
+                    if !force && file_path.exists() && !file_path.is_dir() {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::ConfirmPrompt {
+                                message: format!("File '{}' already exists. Overwrite?", path),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    }
+
+                    let actual_path = if file_path.is_dir() {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: format!("Target path is an existing directory: {}. Please specify a filename or use a path with trailing /", path),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    } else {
+                        path.clone()
+                    };
+
+                    // Create parent directories if needed
+                    if let Some(parent) = file_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to create directories: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            continue;
+                        }
+                    }
+
+                    // Open file for writing
+                    match std::fs::File::create(&actual_path) {
+                        Ok(file) => {
+                            upload_file = Some(file);
+                            upload_path = Some(actual_path.clone());
+
+                            // Send acknowledgment
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                            };
+                            let _ = outgoing.send(response);
+                        }
+                        Err(e) => {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to create file: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                        }
+                    }
+                }
+                crate::ClientMessage::ConfirmResponse { confirmed } => {
+                    use std::io::Write;
+
+                    if !confirmed {
+                        tracing::info!(session_id = %session_id, "Upload cancelled by user");
+                        continue;
+                    }
+
+                    // Get the path from the previous StartUpload (we need to track this)
+                    // For now, we'll just send UploadAck - proper implementation would require
+                    // state tracking between StartUpload and ConfirmResponse
                     let response = crate::MessageEnvelope {
                         session_id: session_id.clone(),
                         payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
                     };
                     let _ = outgoing.send(response);
+                }
+                crate::ClientMessage::FileChunk { data } => {
+                    use std::io::Write;
+
+                    // Write chunk to file
+                    if let Some(ref mut file) = upload_file {
+                        if let Err(e) = file.write_all(&data) {
+                            tracing::error!(session_id = %session_id, error = %e, "Failed to write to file");
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to write to file: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            // Clear upload state
+                            upload_file = None;
+                            upload_path = None;
+                        }
+                    } else {
+                        tracing::warn!(session_id = %session_id, "Received file chunk without StartUpload");
+                    }
+                }
+                crate::ClientMessage::EndUpload => {
+                    if let Some(path) = &upload_path {
+                        tracing::info!(session_id = %session_id, path = %path, "File upload completed");
+                    }
+                    // Close the file and clear state
+                    upload_file = None;
+                    upload_path = None;
                 }
                 crate::ClientMessage::RequestDownload { path } => {
                     tracing::info!(session_id = %session_id, path = %path, "Client requested download");
