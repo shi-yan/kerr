@@ -1031,102 +1031,92 @@ async fn upload_file(
         )
     })?;
 
-    // Send Hello message with FileTransfer session type
+    // Generate a unique session ID for this upload
+    use rand::Rng;
+    let session_id = format!("upload_{}", rand::rng().random::<u64>());
+
+    // Send Hello message using the multiplexed protocol
     let hello_msg = crate::ClientMessage::Hello {
         session_type: crate::SessionType::FileTransfer,
     };
-    let hello_data = bincode::encode_to_vec(&hello_msg, bincode::config::standard())
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to encode hello: {}", e),
-            )
-        })?;
-
-    // Send length prefix then message
-    let len = (hello_data.len() as u32).to_be_bytes();
-    send.write_all(&len).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send hello length: {}", e),
-        )
-    })?;
-    send.write_all(&hello_data).await.map_err(|e| {
+    let hello_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(hello_msg),
+    };
+    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to send hello: {}", e),
         )
     })?;
 
-    // Send StartUpload message
+    // Send StartUpload message using the multiplexed protocol
     let start_msg = crate::ClientMessage::StartUpload {
         path: target_path.clone(),
         size: file_data.len() as u64,
         is_dir: false,
         force: true, // Overwrite if exists
     };
-    let start_data = bincode::encode_to_vec(&start_msg, bincode::config::standard())
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to encode start upload: {}", e),
-            )
-        })?;
-
-    let len = (start_data.len() as u32).to_be_bytes();
-    send.write_all(&len).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send start upload length: {}", e),
-        )
-    })?;
-    send.write_all(&start_data).await.map_err(|e| {
+    let start_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(start_msg),
+    };
+    crate::send_envelope(&mut send, &start_envelope).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to send start upload: {}", e),
         )
     })?;
 
-    // Wait for server response (it may ask for confirmation if file exists)
-    let mut len_bytes = [0u8; 4];
-    recv.read_exact(&mut len_bytes).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read response length: {}", e),
-        )
-    })?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-
-    let mut msg_bytes = vec![0u8; len];
-    recv.read_exact(&mut msg_bytes).await.map_err(|e| {
+    // Wait for server response using the multiplexed protocol
+    let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to read response: {}", e),
         )
     })?;
 
-    // Send file data in chunks
+    // Extract server message from envelope
+    let response = match response_envelope.payload {
+        crate::MessagePayload::Server(server_msg) => server_msg,
+        _ => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unexpected message type".to_string(),
+            ))
+        }
+    };
+
+    // Check response - should be UploadAck
+    match response {
+        crate::ServerMessage::UploadAck => {
+            // Good to proceed
+        }
+        crate::ServerMessage::Error { message } => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Server error: {}", message),
+            ));
+        }
+        _ => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unexpected server response".to_string(),
+            ));
+        }
+    }
+
+    // Send file data in chunks using the multiplexed protocol
     const CHUNK_SIZE: usize = 65536; // 64KB chunks
     for chunk in file_data.chunks(CHUNK_SIZE) {
         let chunk_msg = crate::ClientMessage::FileChunk {
             data: chunk.to_vec(),
         };
-        let chunk_data = bincode::encode_to_vec(&chunk_msg, bincode::config::standard())
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to encode chunk: {}", e),
-                )
-            })?;
-
-        let len = (chunk_data.len() as u32).to_be_bytes();
-        send.write_all(&len).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to send chunk length: {}", e),
-            )
-        })?;
-        send.write_all(&chunk_data).await.map_err(|e| {
+        let chunk_envelope = crate::MessageEnvelope {
+            session_id: session_id.clone(),
+            payload: crate::MessagePayload::Client(chunk_msg),
+        };
+        crate::send_envelope(&mut send, &chunk_envelope).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to send chunk: {}", e),
@@ -1134,24 +1124,13 @@ async fn upload_file(
         })?;
     }
 
-    // Send EndUpload message
+    // Send EndUpload message using the multiplexed protocol
     let end_msg = crate::ClientMessage::EndUpload;
-    let end_data = bincode::encode_to_vec(&end_msg, bincode::config::standard())
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to encode end upload: {}", e),
-            )
-        })?;
-
-    let len = (end_data.len() as u32).to_be_bytes();
-    send.write_all(&len).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send end upload length: {}", e),
-        )
-    })?;
-    send.write_all(&end_data).await.map_err(|e| {
+    let end_envelope = crate::MessageEnvelope {
+        session_id: session_id.clone(),
+        payload: crate::MessagePayload::Client(end_msg),
+    };
+    crate::send_envelope(&mut send, &end_envelope).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to send end upload: {}", e),
