@@ -9,6 +9,56 @@ use crossterm::{
 };
 use crate::{ClientMessage, ServerMessage, ALPN};
 use bincode::config;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::fs;
+
+/// Resume metadata stored in .{filename}.resume_json
+#[derive(Debug, Serialize, Deserialize)]
+struct ResumeMetadata {
+    /// Number of bytes successfully received
+    bytes_received: u64,
+    /// Total file size expected
+    total_size: u64,
+    /// Remote path being downloaded
+    remote_path: String,
+}
+
+/// Get the resume metadata file path for a given local file
+fn get_resume_metadata_path(local_path: &str) -> PathBuf {
+    let path = Path::new(local_path);
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let filename = path.file_name().unwrap().to_string_lossy();
+    parent.join(format!(".{}.resume_json", filename))
+}
+
+/// Read resume metadata if it exists
+fn read_resume_metadata(local_path: &str) -> Option<ResumeMetadata> {
+    let metadata_path = get_resume_metadata_path(local_path);
+    if metadata_path.exists() {
+        let content = fs::read_to_string(&metadata_path).ok()?;
+        serde_json::from_str(&content).ok()
+    } else {
+        None
+    }
+}
+
+/// Write resume metadata
+fn write_resume_metadata(local_path: &str, metadata: &ResumeMetadata) -> std::io::Result<()> {
+    let metadata_path = get_resume_metadata_path(local_path);
+    let json = serde_json::to_string_pretty(metadata)?;
+    fs::write(&metadata_path, json)?;
+    Ok(())
+}
+
+/// Delete resume metadata file
+fn delete_resume_metadata(local_path: &str) -> std::io::Result<()> {
+    let metadata_path = get_resume_metadata_path(local_path);
+    if metadata_path.exists() {
+        fs::remove_file(&metadata_path)?;
+    }
+    Ok(())
+}
 
 /// Convert a crossterm KeyEvent to raw terminal bytes
 fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
@@ -470,9 +520,22 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
 pub async fn pull_file(connection_string: String, remote_path: String, local_path: String) -> Result<()> {
     use std::path::Path;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Write, Seek, SeekFrom};
     use indicatif::{ProgressBar, ProgressStyle};
     use rand::Rng;
+
+    // Check for existing resume metadata
+    let resume_metadata = read_resume_metadata(&local_path);
+    let resume_offset = resume_metadata.as_ref().map(|m| m.bytes_received).unwrap_or(0);
+
+    if let Some(ref metadata) = resume_metadata {
+        if metadata.remote_path == remote_path {
+            println!("Found incomplete download, resuming from {} bytes...", metadata.bytes_received);
+        } else {
+            println!("Warning: Resume metadata points to different remote file, starting fresh");
+            let _ = delete_resume_metadata(&local_path);
+        }
+    }
 
     // Decode the compressed connection string (base64 -> gzip -> JSON)
     let addr = crate::decode_connection_string(&connection_string)
@@ -494,9 +557,10 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     };
     crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
-    // Send RequestDownload message using the multiplexed protocol
+    // Send RequestDownload message with offset for resume support
     let request_msg = ClientMessage::RequestDownload {
         path: remote_path.clone(),
+        offset: resume_offset,
     };
     let request_envelope = crate::MessageEnvelope {
         session_id: session_id.clone(),
@@ -526,9 +590,25 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     crate::transfer::ensure_parent_dir(local)
         .expect("Failed to create parent directory");
 
-    // Open file for writing
-    let mut output_file = fs::File::create(&local_path)
-        .expect("Failed to create output file");
+    // Open file for writing - append if resuming, create if new
+    let mut output_file = if resume_offset > 0 {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&local_path)
+            .expect("Failed to open file for resuming");
+        // Verify file size matches resume offset
+        let file_size = file.metadata().expect("Failed to get file metadata").len();
+        if file_size != resume_offset {
+            eprintln!("Warning: File size mismatch, starting fresh");
+            drop(file);
+            let _ = delete_resume_metadata(&local_path);
+            fs::File::create(&local_path).expect("Failed to create output file")
+        } else {
+            file
+        }
+    } else {
+        fs::File::create(&local_path).expect("Failed to create output file")
+    };
 
     // Create progress bar
     let pb = ProgressBar::new(total_size);
@@ -537,9 +617,11 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
         .unwrap()
         .progress_chars("#>-"));
 
-    let mut bytes_received = 0u64;
+    let mut bytes_received = resume_offset;
+    pb.set_position(bytes_received);
 
     // Receive file chunks using the multiplexed protocol
+    let mut chunk_count = 0u64;
     loop {
         let envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
@@ -549,18 +631,45 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
                     .expect("Failed to write to file");
                 bytes_received += data.len() as u64;
                 pb.set_position(bytes_received);
+
+                // Update resume metadata every 10 chunks to avoid excessive I/O
+                chunk_count += 1;
+                if chunk_count % 10 == 0 {
+                    let metadata = ResumeMetadata {
+                        bytes_received,
+                        total_size,
+                        remote_path: remote_path.clone(),
+                    };
+                    let _ = write_resume_metadata(&local_path, &metadata);
+                }
             }
             crate::MessagePayload::Server(ServerMessage::EndDownload) => {
                 pb.finish_with_message("Download complete!");
+                // Delete resume metadata on successful completion
+                let _ = delete_resume_metadata(&local_path);
                 break;
             }
             crate::MessagePayload::Server(ServerMessage::Error { message }) => {
                 eprintln!("Server error: {}", message);
                 pb.finish_with_message("Download failed");
+                // Save resume metadata on error
+                let metadata = ResumeMetadata {
+                    bytes_received,
+                    total_size,
+                    remote_path: remote_path.clone(),
+                };
+                let _ = write_resume_metadata(&local_path, &metadata);
                 return Ok(());
             }
             _ => {
                 eprintln!("Unexpected server message during download");
+                // Save resume metadata on unexpected error
+                let metadata = ResumeMetadata {
+                    bytes_received,
+                    total_size,
+                    remote_path: remote_path.clone(),
+                };
+                let _ = write_resume_metadata(&local_path, &metadata);
                 break;
             }
         }

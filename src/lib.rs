@@ -71,7 +71,7 @@ pub enum ClientMessage {
     /// Confirmation response (true = yes, false = no)
     ConfirmResponse { confirmed: bool },
     /// Request file download (pull)
-    RequestDownload { path: String },
+    RequestDownload { path: String, offset: u64 },
     /// Request to list directory contents (for file browser)
     FsReadDir { path: String },
     /// Request file metadata (for file browser)
