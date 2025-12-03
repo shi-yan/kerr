@@ -1116,8 +1116,8 @@ impl KerrServer {
                     upload_file = None;
                     upload_path = None;
                 }
-                crate::ClientMessage::RequestDownload { path } => {
-                    println!("\r\nClient requested download: {}\r", path);
+                crate::ClientMessage::RequestDownload { path, offset } => {
+                    println!("\r\nClient requested download: {} (offset: {})\r", path, offset);
 
                     // Check if path exists
                     let file_path = Path::new(&path);
@@ -1157,7 +1157,23 @@ impl KerrServer {
                         }
                     };
 
-                    println!("\r\nSending file: {} ({} bytes, is_dir: {})\r", path, total_size, is_dir);
+                    // Validate offset
+                    if offset > total_size {
+                        let err_msg = crate::ServerMessage::Error {
+                            message: format!("Offset {} exceeds file size {}", offset, total_size),
+                        };
+                        eprintln!("\r\nError: Offset {} exceeds file size {}\r", offset, total_size);
+                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            let len = (encoded.len() as u32).to_be_bytes();
+                            let mut full_msg = Vec::new();
+                            full_msg.extend_from_slice(&len);
+                            full_msg.extend_from_slice(&encoded);
+                            let _ = send_tx.send(full_msg);
+                        }
+                        continue;
+                    }
+
+                    println!("\r\nSending file: {} ({} bytes, is_dir: {}, offset: {})\r", path, total_size, is_dir, offset);
 
                     // Send StartDownload message
                     let start_msg = crate::ServerMessage::StartDownload {
@@ -1192,8 +1208,9 @@ impl KerrServer {
                     };
 
                     // Send file chunks
-                    use std::io::Read;
+                    use std::io::{Read, Seek, SeekFrom};
                     let mut bytes_sent = 0u64;
+                    let mut bytes_to_skip = offset;
 
                     for file in files {
                         let mut f = match std::fs::File::open(&file) {
@@ -1203,6 +1220,30 @@ impl KerrServer {
                                 continue;
                             }
                         };
+
+                        // Get file size
+                        let file_size = match f.metadata() {
+                            Ok(metadata) => metadata.len(),
+                            Err(e) => {
+                                eprintln!("\r\nFailed to get file metadata {:?}: {}\r", file, e);
+                                continue;
+                            }
+                        };
+
+                        // Skip this file if we need to skip more bytes than it contains
+                        if bytes_to_skip >= file_size {
+                            bytes_to_skip -= file_size;
+                            continue;
+                        }
+
+                        // Seek to the offset position if needed
+                        if bytes_to_skip > 0 {
+                            if let Err(e) = f.seek(SeekFrom::Start(bytes_to_skip)) {
+                                eprintln!("\r\nFailed to seek to offset {:?}: {}\r", file, e);
+                                continue;
+                            }
+                            bytes_to_skip = 0;
+                        }
 
                         let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
 
@@ -2076,8 +2117,8 @@ impl KerrServer {
                     upload_file = None;
                     upload_path = None;
                 }
-                crate::ClientMessage::RequestDownload { path } => {
-                    tracing::info!(session_id = %session_id, path = %path, "Client requested download");
+                crate::ClientMessage::RequestDownload { path, offset } => {
+                    tracing::info!(session_id = %session_id, path = %path, offset = offset, "Client requested download");
 
                     // Check if path exists
                     let file_path = Path::new(&path);
@@ -2109,7 +2150,19 @@ impl KerrServer {
                         }
                     };
 
-                    tracing::info!(session_id = %session_id, path = %path, size = total_size, is_dir = is_dir,
+                    // Validate offset
+                    if offset > total_size {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: format!("Offset {} exceeds file size {}", offset, total_size),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    }
+
+                    tracing::info!(session_id = %session_id, path = %path, size = total_size, is_dir = is_dir, offset = offset,
                         "Sending file");
 
                     // Send StartDownload message
@@ -2138,8 +2191,9 @@ impl KerrServer {
                     };
 
                     // Send file chunks
-                    use std::io::Read;
+                    use std::io::{Read, Seek, SeekFrom};
                     let mut bytes_sent = 0u64;
+                    let mut bytes_to_skip = offset;
 
                     for file in files {
                         let mut f = match std::fs::File::open(&file) {
@@ -2150,6 +2204,32 @@ impl KerrServer {
                                 continue;
                             }
                         };
+
+                        // Get file size
+                        let file_size = match f.metadata() {
+                            Ok(metadata) => metadata.len(),
+                            Err(e) => {
+                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                    "Failed to get file metadata");
+                                continue;
+                            }
+                        };
+
+                        // Skip this file if we need to skip more bytes than it contains
+                        if bytes_to_skip >= file_size {
+                            bytes_to_skip -= file_size;
+                            continue;
+                        }
+
+                        // Seek to the offset position if needed
+                        if bytes_to_skip > 0 {
+                            if let Err(e) = f.seek(SeekFrom::Start(bytes_to_skip)) {
+                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                    "Failed to seek to offset");
+                                continue;
+                            }
+                            bytes_to_skip = 0;
+                        }
 
                         let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
 
