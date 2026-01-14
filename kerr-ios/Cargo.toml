@@ -1,0 +1,33 @@
+[package]
+name = "kerr-ios"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+name = "kerr_ios"
+
+[dependencies]
+# Core kerr dependencies
+iroh = "0.95.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "2.0"
+anyhow = "1.0"
+futures = "0.3"
+async-trait = "0.1"
+base64 = "0.22"
+flate2 = "1.1"
+
+# UniFFI for Swift bindings
+uniffi = { version = "0.28", features = ["cli"] }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Better optimization
+strip = true        # Strip symbols
