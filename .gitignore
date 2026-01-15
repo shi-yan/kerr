@@ -1,6 +1,30 @@
 /target
+kerr-ios/target
 
 # Frontend
 frontend/node_modules
 frontend/dist
 frontend/.vite
+
+# iOS
+ios/Frameworks/*.a
+ios/Generated/
+*.xcworkspace
+*.xcuserdata
+*.xcuserdatad
+.DS_Store
+*.swp
+*~
+DerivedData/
+build/
+.build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM

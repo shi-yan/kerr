@@ -1,0 +1,118 @@
+namespace kerr_ios {
+    // Create a new Iroh endpoint for P2P connections
+    [Throws=KerrError]
+    Endpoint create_endpoint();
+
+    // Decode a connection string to an endpoint address
+    [Throws=KerrError]
+    string decode_connection_string(string conn_str);
+};
+
+// Error types
+[Error]
+enum KerrError {
+    "ConnectionFailed",
+    "InvalidConnectionString",
+    "FileSystemError",
+    "ShellError",
+    "NetworkError",
+    "Timeout",
+};
+
+// Represents an Iroh endpoint for P2P connections
+interface Endpoint {
+    // Connect to a remote server using a connection string
+    [Throws=KerrError]
+    Session connect(string connection_string);
+
+    // Get the connection string for this endpoint
+    [Throws=KerrError]
+    string connection_string();
+};
+
+// Represents an active connection session
+interface Session {
+    // Get file browser for remote filesystem operations
+    [Throws=KerrError]
+    FileBrowser file_browser();
+
+    // Start a shell session with a callback for output
+    [Throws=KerrError]
+    ShellSession start_shell(ShellCallback callback);
+
+    // Disconnect from the remote server
+    void disconnect();
+
+    // Check if the session is still connected
+    boolean is_connected();
+};
+
+// File system operations
+interface FileBrowser {
+    // List files in a directory
+    [Throws=KerrError]
+    sequence<FileEntry> list_dir(string path);
+
+    // Get metadata for a file
+    [Throws=KerrError]
+    FileMetadata metadata(string path);
+
+    // Download a file as bytes
+    [Throws=KerrError]
+    bytes download_file(string path);
+
+    // Upload a file
+    [Throws=KerrError]
+    void upload_file(string path, bytes data);
+
+    // Delete a file or directory
+    [Throws=KerrError]
+    void delete(string path);
+
+    // Check if path exists
+    [Throws=KerrError]
+    boolean exists(string path);
+};
+
+// Shell session for terminal operations
+interface ShellSession {
+    // Send input to the shell
+    [Throws=KerrError]
+    void send_input(string data);
+
+    // Resize the terminal
+    [Throws=KerrError]
+    void resize(u16 cols, u16 rows);
+
+    // Close the shell session
+    void close();
+};
+
+// Callback interface for shell output
+callback interface ShellCallback {
+    // Called when output is received from the shell
+    void on_output(string data);
+
+    // Called when an error occurs
+    void on_error(string message);
+
+    // Called when the shell session closes
+    void on_close();
+};
+
+// File entry information
+dictionary FileEntry {
+    string name;
+    string path;
+    boolean is_dir;
+    boolean is_hidden;
+    FileMetadata? metadata;
+};
+
+// File metadata
+dictionary FileMetadata {
+    u64 size;
+    u64? created_timestamp;  // Unix timestamp in seconds
+    u64? modified_timestamp; // Unix timestamp in seconds
+    boolean is_dir;
+};
