@@ -1109,29 +1109,11 @@ impl KerrServer {
                     }
                 }
                 crate::ClientMessage::EndUpload => {
-                    use std::io::Write;
-
-                    // Flush and close the file
-                    if let Some(mut file) = upload_file.take() {
-                        if let Err(e) = file.flush() {
-                            eprintln!("\r\nFailed to flush file: {}\r", e);
-                        }
-                    }
-
                     if let Some(path) = &upload_path {
                         println!("\r\nFile upload completed: {}\r", path);
                     }
-
-                    // Send acknowledgment that upload is complete
-                    let ack_msg = crate::ServerMessage::UploadAck;
-                    if let Ok(encoded) = bincode::encode_to_vec(&ack_msg, config) {
-                        let len = (encoded.len() as u32).to_be_bytes();
-                        let mut full_msg = Vec::new();
-                        full_msg.extend_from_slice(&len);
-                        full_msg.extend_from_slice(&encoded);
-                        let _ = send_tx.send(full_msg);
-                    }
-
+                    // Close the file and clear state
+                    upload_file = None;
                     upload_path = None;
                 }
                 crate::ClientMessage::RequestDownload { path, offset } => {
@@ -1571,6 +1553,10 @@ impl KerrServer {
     ) -> Result<(), AcceptError> {
         tracing::info!(node_id = %node_id, session_id = %session_id, "File browser session started");
 
+        // File upload state (for uploads through the file browser session)
+        let mut upload_file: Option<std::fs::File> = None;
+        let mut upload_path: Option<String> = None;
+
         // Process incoming file browser requests
         while let Some(msg) = incoming.recv().await {
             match msg {
@@ -1711,6 +1697,107 @@ impl KerrServer {
                             let _ = outgoing.send(response);
                         }
                     }
+                }
+                crate::ClientMessage::StartUpload { path, size, is_dir: _, force } => {
+                    tracing::info!(session_id = %session_id, path = %path, size = size, force = force,
+                        "File upload requested via browser session");
+
+                    let file_path = std::path::Path::new(&path);
+
+                    // If not force mode and file exists, return error
+                    if !force && file_path.exists() && !file_path.is_dir() {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: format!("File '{}' already exists", path),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    }
+
+                    if file_path.is_dir() {
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                message: format!("Target path is an existing directory: {}", path),
+                            }),
+                        };
+                        let _ = outgoing.send(response);
+                        continue;
+                    }
+
+                    // Create parent directories if needed
+                    if let Some(parent) = file_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to create directories: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            continue;
+                        }
+                    }
+
+                    // Open file for writing
+                    match std::fs::File::create(&path) {
+                        Ok(file) => {
+                            upload_file = Some(file);
+                            upload_path = Some(path.clone());
+                            // No ack here - ack is sent after EndUpload
+                        }
+                        Err(e) => {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to create file: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                        }
+                    }
+                }
+                crate::ClientMessage::FileChunk { data } => {
+                    use std::io::Write;
+                    if let Some(ref mut file) = upload_file {
+                        if let Err(e) = file.write_all(&data) {
+                            tracing::error!(session_id = %session_id, error = %e, "Failed to write to file");
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Failed to write to file: {}", e),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            upload_file = None;
+                            upload_path = None;
+                        }
+                    }
+                }
+                crate::ClientMessage::EndUpload => {
+                    use std::io::Write;
+
+                    // Flush and close the file
+                    if let Some(mut file) = upload_file.take() {
+                        if let Err(e) = file.flush() {
+                            tracing::error!(session_id = %session_id, error = %e, "Failed to flush file");
+                        }
+                    }
+
+                    if let Some(path) = &upload_path {
+                        tracing::info!(session_id = %session_id, path = %path, "File upload completed");
+                    }
+
+                    // Send single ack for the entire upload sequence
+                    let response = crate::MessageEnvelope {
+                        session_id: session_id.clone(),
+                        payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                    };
+                    let _ = outgoing.send(response);
+
+                    upload_path = None;
                 }
                 crate::ClientMessage::Disconnect => {
                     tracing::info!(session_id = %session_id, "Client requested disconnect");
@@ -2128,26 +2215,11 @@ impl KerrServer {
                     }
                 }
                 crate::ClientMessage::EndUpload => {
-                    use std::io::Write;
-
-                    // Flush and close the file
-                    if let Some(mut file) = upload_file.take() {
-                        if let Err(e) = file.flush() {
-                            tracing::error!(session_id = %session_id, error = %e, "Failed to flush file");
-                        }
-                    }
-
                     if let Some(path) = &upload_path {
                         tracing::info!(session_id = %session_id, path = %path, "File upload completed");
                     }
-
-                    // Send acknowledgment that upload is complete
-                    let response = crate::MessageEnvelope {
-                        session_id: session_id.clone(),
-                        payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
-                    };
-                    let _ = outgoing.send(response);
-
+                    // Close the file and clear state
+                    upload_file = None;
                     upload_path = None;
                 }
                 crate::ClientMessage::RequestDownload { path, offset } => {

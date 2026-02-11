@@ -351,6 +351,67 @@ impl RemoteFilesystem {
         }
     }
 
+    /// Upload a file to the remote filesystem.
+    /// Sends StartUpload + FileChunks + EndUpload through the shared multiplexed stream,
+    /// then reads a single UploadAck response.
+    pub async fn upload_file(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        const CHUNK_SIZE: usize = 65536; // 64KB chunks
+
+        // Hold both locks for the entire upload sequence to prevent
+        // interleaving with other requests on the shared stream.
+        let mut send = self.send.lock().await;
+        let mut recv = self.recv.lock().await;
+
+        // Send StartUpload
+        let start_envelope = crate::MessageEnvelope {
+            session_id: self.session_id.clone(),
+            payload: crate::MessagePayload::Client(crate::ClientMessage::StartUpload {
+                path: path.display().to_string(),
+                size: data.len() as u64,
+                is_dir: false,
+                force: true,
+            }),
+        };
+        crate::send_envelope(&mut *send, &start_envelope)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        // Send file data in chunks
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let chunk_envelope = crate::MessageEnvelope {
+                session_id: self.session_id.clone(),
+                payload: crate::MessagePayload::Client(crate::ClientMessage::FileChunk {
+                    data: chunk.to_vec(),
+                }),
+            };
+            crate::send_envelope(&mut *send, &chunk_envelope)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        }
+
+        // Send EndUpload
+        let end_envelope = crate::MessageEnvelope {
+            session_id: self.session_id.clone(),
+            payload: crate::MessagePayload::Client(crate::ClientMessage::EndUpload),
+        };
+        crate::send_envelope(&mut *send, &end_envelope)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        // Read the single ack response
+        let response_envelope = crate::recv_envelope(&mut *recv)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        match response_envelope.payload {
+            crate::MessagePayload::Server(crate::ServerMessage::UploadAck) => Ok(()),
+            crate::MessagePayload::Server(crate::ServerMessage::Error { message }) => {
+                Err(io::Error::new(io::ErrorKind::Other, message))
+            }
+            _ => Err(io::Error::new(io::ErrorKind::Other, "Unexpected response type")),
+        }
+    }
+
     /// Delete a file or directory on the remote filesystem
     pub async fn delete_file(&self, path: &Path) -> io::Result<()> {
         let msg = crate::ClientMessage::FsDelete {
