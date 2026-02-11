@@ -1137,6 +1137,34 @@ async fn upload_file(
         )
     })?;
 
+    // Wait for server to confirm upload completion before closing the connection.
+    // Without this, the QUIC connection may be dropped before the server has
+    // finished reading and writing all the file chunks, resulting in zero-byte files.
+    let complete_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read upload completion: {}", e),
+        )
+    })?;
+
+    match complete_envelope.payload {
+        crate::MessagePayload::Server(crate::ServerMessage::UploadAck) => {
+            // Upload completed successfully
+        }
+        crate::MessagePayload::Server(crate::ServerMessage::Error { message }) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Upload error: {}", message),
+            ));
+        }
+        _ => {
+            // Unexpected response, but don't fail - data was likely written
+        }
+    }
+
+    // Gracefully close the send stream
+    let _ = send.finish();
+
     Ok(Json(serde_json::json!({
         "success": true,
         "path": target_path,

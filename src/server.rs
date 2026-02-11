@@ -1109,11 +1109,29 @@ impl KerrServer {
                     }
                 }
                 crate::ClientMessage::EndUpload => {
+                    use std::io::Write;
+
+                    // Flush and close the file
+                    if let Some(mut file) = upload_file.take() {
+                        if let Err(e) = file.flush() {
+                            eprintln!("\r\nFailed to flush file: {}\r", e);
+                        }
+                    }
+
                     if let Some(path) = &upload_path {
                         println!("\r\nFile upload completed: {}\r", path);
                     }
-                    // Close the file and clear state
-                    upload_file = None;
+
+                    // Send acknowledgment that upload is complete
+                    let ack_msg = crate::ServerMessage::UploadAck;
+                    if let Ok(encoded) = bincode::encode_to_vec(&ack_msg, config) {
+                        let len = (encoded.len() as u32).to_be_bytes();
+                        let mut full_msg = Vec::new();
+                        full_msg.extend_from_slice(&len);
+                        full_msg.extend_from_slice(&encoded);
+                        let _ = send_tx.send(full_msg);
+                    }
+
                     upload_path = None;
                 }
                 crate::ClientMessage::RequestDownload { path, offset } => {
@@ -2110,11 +2128,26 @@ impl KerrServer {
                     }
                 }
                 crate::ClientMessage::EndUpload => {
+                    use std::io::Write;
+
+                    // Flush and close the file
+                    if let Some(mut file) = upload_file.take() {
+                        if let Err(e) = file.flush() {
+                            tracing::error!(session_id = %session_id, error = %e, "Failed to flush file");
+                        }
+                    }
+
                     if let Some(path) = &upload_path {
                         tracing::info!(session_id = %session_id, path = %path, "File upload completed");
                     }
-                    // Close the file and clear state
-                    upload_file = None;
+
+                    // Send acknowledgment that upload is complete
+                    let response = crate::MessageEnvelope {
+                        session_id: session_id.clone(),
+                        payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                    };
+                    let _ = outgoing.send(response);
+
                     upload_path = None;
                 }
                 crate::ClientMessage::RequestDownload { path, offset } => {
