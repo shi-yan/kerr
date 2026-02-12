@@ -967,7 +967,6 @@ async fn upload_file(
         let name = field.name().unwrap_or("").to_string();
 
         if name == "file" {
-            // Read file content
             let data = field.bytes().await.map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
@@ -976,7 +975,6 @@ async fn upload_file(
             })?;
             file_data = Some(data.to_vec());
         } else if name == "path" {
-            // Read target path
             let text = field.text().await.map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
@@ -1001,12 +999,11 @@ async fn upload_file(
         )
     })?;
 
-    // Get the endpoint to create a new connection
-    let endpoint = state.endpoint.clone();
-    let node_addr = {
-        let addr_lock = state.node_addr.lock().await;
-        match addr_lock.as_ref() {
-            Some(a) => a.clone(),
+    // Use the existing shared RemoteFilesystem (single multiplexed QUIC stream)
+    let remote_fs = {
+        let fs_lock = state.remote_fs.lock().await;
+        match fs_lock.as_ref() {
+            Some(fs) => Arc::clone(fs),
             None => {
                 return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1016,124 +1013,11 @@ async fn upload_file(
         }
     };
 
-    // Create a new connection for file transfer
-    let conn = endpoint.connect(node_addr, crate::ALPN).await.map_err(|e| {
+    let path = std::path::PathBuf::from(&target_path);
+    remote_fs.upload_file(&path, &file_data).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to connect: {}", e),
-        )
-    })?;
-
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to open stream: {}", e),
-        )
-    })?;
-
-    // Generate a unique session ID for this upload
-    use rand::Rng;
-    let session_id = format!("upload_{}", rand::rng().random::<u64>());
-
-    // Send Hello message using the multiplexed protocol
-    let hello_msg = crate::ClientMessage::Hello {
-        session_type: crate::SessionType::FileTransfer,
-    };
-    let hello_envelope = crate::MessageEnvelope {
-        session_id: session_id.clone(),
-        payload: crate::MessagePayload::Client(hello_msg),
-    };
-    crate::send_envelope(&mut send, &hello_envelope).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send hello: {}", e),
-        )
-    })?;
-
-    // Send StartUpload message using the multiplexed protocol
-    let start_msg = crate::ClientMessage::StartUpload {
-        path: target_path.clone(),
-        size: file_data.len() as u64,
-        is_dir: false,
-        force: true, // Overwrite if exists
-    };
-    let start_envelope = crate::MessageEnvelope {
-        session_id: session_id.clone(),
-        payload: crate::MessagePayload::Client(start_msg),
-    };
-    crate::send_envelope(&mut send, &start_envelope).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send start upload: {}", e),
-        )
-    })?;
-
-    // Wait for server response using the multiplexed protocol
-    let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read response: {}", e),
-        )
-    })?;
-
-    // Extract server message from envelope
-    let response = match response_envelope.payload {
-        crate::MessagePayload::Server(server_msg) => server_msg,
-        _ => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unexpected message type".to_string(),
-            ))
-        }
-    };
-
-    // Check response - should be UploadAck
-    match response {
-        crate::ServerMessage::UploadAck => {
-            // Good to proceed
-        }
-        crate::ServerMessage::Error { message } => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Server error: {}", message),
-            ));
-        }
-        _ => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unexpected server response".to_string(),
-            ));
-        }
-    }
-
-    // Send file data in chunks using the multiplexed protocol
-    const CHUNK_SIZE: usize = 65536; // 64KB chunks
-    for chunk in file_data.chunks(CHUNK_SIZE) {
-        let chunk_msg = crate::ClientMessage::FileChunk {
-            data: chunk.to_vec(),
-        };
-        let chunk_envelope = crate::MessageEnvelope {
-            session_id: session_id.clone(),
-            payload: crate::MessagePayload::Client(chunk_msg),
-        };
-        crate::send_envelope(&mut send, &chunk_envelope).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to send chunk: {}", e),
-            )
-        })?;
-    }
-
-    // Send EndUpload message using the multiplexed protocol
-    let end_msg = crate::ClientMessage::EndUpload;
-    let end_envelope = crate::MessageEnvelope {
-        session_id: session_id.clone(),
-        payload: crate::MessagePayload::Client(end_msg),
-    };
-    crate::send_envelope(&mut send, &end_envelope).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send end upload: {}", e),
+            format!("Failed to upload file: {}", e),
         )
     })?;
 

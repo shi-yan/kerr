@@ -269,6 +269,9 @@ pub async fn run_client(connection_string: String) -> Result<()> {
                 ServerMessage::EndDownload => {
                     // Download end - not used in run_client
                 }
+                ServerMessage::FileStart { .. } => {
+                    // File start - not used in run_client
+                }
                 ServerMessage::Progress { .. } => {
                     // Progress update - not used in run_client
                 }
@@ -436,27 +439,22 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
                     // Good to proceed
                 }
                 crate::MessagePayload::Server(ServerMessage::Error { message }) => {
-                    eprintln!("Server error: {}", message);
-                    return Ok(());
+                    return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Server error: {}", message)));
                 }
                 _ => {
-                    eprintln!("Unexpected server response");
-                    return Ok(());
+                    return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Unexpected server response after confirmation")));
                 }
             }
         }
         ServerMessage::Error { message } => {
-            eprintln!("Server error: {}", message);
-            return Ok(());
+            return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Server error: {}", message)));
         }
         _ => {
-            eprintln!("Unexpected server response");
-            return Ok(());
+            return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Unexpected server response")));
         }
         }
         _ => {
-            eprintln!("Unexpected message type");
-            return Ok(());
+            return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Unexpected message type from server")));
         }
     }
 
@@ -472,8 +470,27 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     let files = get_files_recursive(local)
         .expect("Failed to get files");
 
-    for file in files {
-        let mut f = fs::File::open(&file)
+    for file in &files {
+        // For directory uploads, send FileStart with relative path for each file
+        if is_dir {
+            let relative = file.strip_prefix(local)
+                .expect("Failed to compute relative path");
+            let relative_str = relative.to_string_lossy().to_string();
+            let file_size = fs::metadata(file)
+                .expect("Failed to get file metadata").len();
+
+            let start_msg = ClientMessage::FileStart {
+                relative_path: relative_str,
+                size: file_size,
+            };
+            let start_envelope = crate::MessageEnvelope {
+                session_id: session_id.clone(),
+                payload: crate::MessagePayload::Client(start_msg),
+            };
+            crate::send_envelope(&mut send, &start_envelope).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+        }
+
+        let mut f = fs::File::open(file)
             .expect("Failed to open file");
         let mut buffer = vec![0u8; CHUNK_SIZE];
 
@@ -520,20 +537,35 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
 pub async fn pull_file(connection_string: String, remote_path: String, local_path: String) -> Result<()> {
     use std::path::Path;
     use std::fs;
-    use std::io::{Write, Seek, SeekFrom};
+    use std::io::Write;
     use indicatif::{ProgressBar, ProgressStyle};
     use rand::Rng;
 
-    // Check for existing resume metadata
+    // Check for existing resume metadata and validate before using
     let resume_metadata = read_resume_metadata(&local_path);
-    let resume_offset = resume_metadata.as_ref().map(|m| m.bytes_received).unwrap_or(0);
+    let mut resume_offset = 0u64;
 
     if let Some(ref metadata) = resume_metadata {
-        if metadata.remote_path == remote_path {
-            println!("Found incomplete download, resuming from {} bytes...", metadata.bytes_received);
-        } else {
+        if metadata.remote_path != remote_path {
             println!("Warning: Resume metadata points to different remote file, starting fresh");
             let _ = delete_resume_metadata(&local_path);
+        } else {
+            // Verify local file size matches the resume offset before using it
+            let local_file = Path::new(&local_path);
+            if local_file.exists() {
+                let file_size = fs::metadata(local_file).map(|m| m.len()).unwrap_or(0);
+                if file_size == metadata.bytes_received {
+                    println!("Found incomplete download, resuming from {} bytes...", metadata.bytes_received);
+                    resume_offset = metadata.bytes_received;
+                } else {
+                    println!("Warning: File size mismatch ({} vs expected {}), starting fresh",
+                        file_size, metadata.bytes_received);
+                    let _ = delete_resume_metadata(&local_path);
+                }
+            } else {
+                println!("Warning: Local file missing, starting fresh");
+                let _ = delete_resume_metadata(&local_path);
+            }
         }
     }
 
@@ -571,43 +603,38 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     // Wait for StartDownload or Error
     let response_envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
-    let (total_size, _is_dir) = match response_envelope.payload {
+    let (total_size, is_dir) = match response_envelope.payload {
         crate::MessagePayload::Server(ServerMessage::StartDownload { size, is_dir }) => (size, is_dir),
         crate::MessagePayload::Server(ServerMessage::Error { message }) => {
-            eprintln!("Server error: {}", message);
-            return Ok(());
+            return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Server error: {}", message)));
         }
         _ => {
-            eprintln!("Unexpected server response");
-            return Ok(());
+            return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Unexpected server response")));
         }
     };
 
     println!("Downloading {} ({} bytes)...", remote_path, total_size);
 
-    // Ensure parent directory exists
+    // Prepare destination
     let local = Path::new(&local_path);
-    crate::transfer::ensure_parent_dir(local)
-        .expect("Failed to create parent directory");
 
-    // Open file for writing - append if resuming, create if new
-    let mut output_file = if resume_offset > 0 {
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(&local_path)
-            .expect("Failed to open file for resuming");
-        // Verify file size matches resume offset
-        let file_size = file.metadata().expect("Failed to get file metadata").len();
-        if file_size != resume_offset {
-            eprintln!("Warning: File size mismatch, starting fresh");
-            drop(file);
-            let _ = delete_resume_metadata(&local_path);
-            fs::File::create(&local_path).expect("Failed to create output file")
-        } else {
-            file
-        }
+    // For directory downloads, create the base directory
+    // For single file downloads, open the output file (with resume support)
+    let mut output_file: Option<fs::File> = if is_dir {
+        fs::create_dir_all(&local_path).expect("Failed to create directory");
+        None
     } else {
-        fs::File::create(&local_path).expect("Failed to create output file")
+        crate::transfer::ensure_parent_dir(local)
+            .expect("Failed to create parent directory");
+        if resume_offset > 0 {
+            // File size was already validated before sending RequestDownload
+            Some(fs::OpenOptions::new()
+                .append(true)
+                .open(&local_path)
+                .expect("Failed to open file for resuming"))
+        } else {
+            Some(fs::File::create(&local_path).expect("Failed to create output file"))
+        }
     };
 
     // Create progress bar
@@ -626,15 +653,43 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
         let envelope = crate::recv_envelope(&mut recv).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
         match envelope.payload {
+            crate::MessagePayload::Server(ServerMessage::FileStart { relative_path, size: _ }) => {
+                // Directory download: open a new file for this entry
+                let file_path = Path::new(&local_path).join(&relative_path);
+                if let Some(parent) = file_path.parent() {
+                    fs::create_dir_all(parent).expect("Failed to create parent directory");
+                }
+                output_file = Some(fs::File::create(&file_path).expect("Failed to create file"));
+            }
             crate::MessagePayload::Server(ServerMessage::FileChunk { data }) => {
-                output_file.write_all(&data)
-                    .expect("Failed to write to file");
+                if let Some(ref mut file) = output_file {
+                    file.write_all(&data)
+                        .expect("Failed to write to file");
+                }
                 bytes_received += data.len() as u64;
                 pb.set_position(bytes_received);
 
-                // Update resume metadata every 10 chunks to avoid excessive I/O
-                chunk_count += 1;
-                if chunk_count % 10 == 0 {
+                // Update resume metadata every 10 chunks (single-file only)
+                if !is_dir {
+                    chunk_count += 1;
+                    if chunk_count % 10 == 0 {
+                        let metadata = ResumeMetadata {
+                            bytes_received,
+                            total_size,
+                            remote_path: remote_path.clone(),
+                        };
+                        let _ = write_resume_metadata(&local_path, &metadata);
+                    }
+                }
+            }
+            crate::MessagePayload::Server(ServerMessage::EndDownload) => {
+                pb.finish_with_message("Download complete!");
+                let _ = delete_resume_metadata(&local_path);
+                break;
+            }
+            crate::MessagePayload::Server(ServerMessage::Error { message }) => {
+                pb.finish_with_message("Download failed");
+                if !is_dir {
                     let metadata = ResumeMetadata {
                         bytes_received,
                         total_size,
@@ -642,35 +697,18 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
                     };
                     let _ = write_resume_metadata(&local_path, &metadata);
                 }
-            }
-            crate::MessagePayload::Server(ServerMessage::EndDownload) => {
-                pb.finish_with_message("Download complete!");
-                // Delete resume metadata on successful completion
-                let _ = delete_resume_metadata(&local_path);
-                break;
-            }
-            crate::MessagePayload::Server(ServerMessage::Error { message }) => {
-                eprintln!("Server error: {}", message);
-                pb.finish_with_message("Download failed");
-                // Save resume metadata on error
-                let metadata = ResumeMetadata {
-                    bytes_received,
-                    total_size,
-                    remote_path: remote_path.clone(),
-                };
-                let _ = write_resume_metadata(&local_path, &metadata);
-                return Ok(());
+                return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Server error: {}", message)));
             }
             _ => {
-                eprintln!("Unexpected server message during download");
-                // Save resume metadata on unexpected error
-                let metadata = ResumeMetadata {
-                    bytes_received,
-                    total_size,
-                    remote_path: remote_path.clone(),
-                };
-                let _ = write_resume_metadata(&local_path, &metadata);
-                break;
+                if !is_dir {
+                    let metadata = ResumeMetadata {
+                        bytes_received,
+                        total_size,
+                        remote_path: remote_path.clone(),
+                    };
+                    let _ = write_resume_metadata(&local_path, &metadata);
+                }
+                return Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Unexpected server message during download")));
             }
         }
     }
