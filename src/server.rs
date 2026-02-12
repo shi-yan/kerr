@@ -2099,6 +2099,9 @@ impl KerrServer {
         // File upload state
         let mut upload_file: Option<std::fs::File> = None;
         let mut upload_path: Option<String> = None;
+        let mut upload_base_path: Option<String> = None; // base dir for directory uploads
+        // Pending upload awaiting user confirmation: (path, size, is_dir, force)
+        let mut pending_upload: Option<(String, u64, bool, bool)> = None;
 
         // Process incoming messages
         while let Some(msg) = incoming.recv().await {
@@ -2109,88 +2112,181 @@ impl KerrServer {
                     tracing::info!(session_id = %session_id, path = %path, size = size, is_dir = is_dir, force = force,
                         "Client requested upload");
 
-                    // Check if path is an existing directory - this is an error
                     let file_path = Path::new(&path);
 
-                    // If not force mode and file exists, ask for confirmation
-                    if !force && file_path.exists() && !file_path.is_dir() {
-                        let response = crate::MessageEnvelope {
-                            session_id: session_id.clone(),
-                            payload: crate::MessagePayload::Server(crate::ServerMessage::ConfirmPrompt {
-                                message: format!("File '{}' already exists. Overwrite?", path),
-                            }),
-                        };
-                        let _ = outgoing.send(response);
-                        continue;
-                    }
-
-                    let actual_path = if file_path.is_dir() {
-                        let response = crate::MessageEnvelope {
-                            session_id: session_id.clone(),
-                            payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
-                                message: format!("Target path is an existing directory: {}. Please specify a filename or use a path with trailing /", path),
-                            }),
-                        };
-                        let _ = outgoing.send(response);
-                        continue;
-                    } else {
-                        path.clone()
-                    };
-
-                    // Create parent directories if needed
-                    if let Some(parent) = file_path.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
+                    if is_dir {
+                        // Directory upload: create the base directory
+                        if let Err(e) = std::fs::create_dir_all(&path) {
                             let response = crate::MessageEnvelope {
                                 session_id: session_id.clone(),
                                 payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
-                                    message: format!("Failed to create directories: {}", e),
+                                    message: format!("Failed to create directory: {}", e),
                                 }),
                             };
                             let _ = outgoing.send(response);
                             continue;
                         }
-                    }
+                        upload_base_path = Some(path.clone());
 
-                    // Open file for writing
-                    match std::fs::File::create(&actual_path) {
-                        Ok(file) => {
-                            upload_file = Some(file);
-                            upload_path = Some(actual_path.clone());
 
-                            // Send acknowledgment
+                        // Send acknowledgment
+                        let response = crate::MessageEnvelope {
+                            session_id: session_id.clone(),
+                            payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                        };
+                        let _ = outgoing.send(response);
+                    } else {
+                        // Single file upload
+
+                        // If not force mode and file exists, ask for confirmation
+                        if !force && file_path.exists() && !file_path.is_dir() {
+                            pending_upload = Some((path.clone(), size, is_dir, force));
                             let response = crate::MessageEnvelope {
                                 session_id: session_id.clone(),
-                                payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
-                            };
-                            let _ = outgoing.send(response);
-                        }
-                        Err(e) => {
-                            let response = crate::MessageEnvelope {
-                                session_id: session_id.clone(),
-                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
-                                    message: format!("Failed to create file: {}", e),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::ConfirmPrompt {
+                                    message: format!("File '{}' already exists. Overwrite?", path),
                                 }),
                             };
                             let _ = outgoing.send(response);
+                            continue;
+                        }
+
+                        if file_path.is_dir() {
+                            let response = crate::MessageEnvelope {
+                                session_id: session_id.clone(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                    message: format!("Target path is an existing directory: {}. Please specify a filename or use a path with trailing /", path),
+                                }),
+                            };
+                            let _ = outgoing.send(response);
+                            continue;
+                        }
+
+                        // Create parent directories if needed
+                        if let Some(parent) = file_path.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                        message: format!("Failed to create directories: {}", e),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                                continue;
+                            }
+                        }
+
+                        // Open file for writing
+                        match std::fs::File::create(&path) {
+                            Ok(file) => {
+                                upload_file = Some(file);
+                                upload_path = Some(path.clone());
+
+
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                                };
+                                let _ = outgoing.send(response);
+                            }
+                            Err(e) => {
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                        message: format!("Failed to create file: {}", e),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                            }
                         }
                     }
                 }
                 crate::ClientMessage::ConfirmResponse { confirmed } => {
-                    use std::io::Write;
-
                     if !confirmed {
                         tracing::info!(session_id = %session_id, "Upload cancelled by user");
+                        pending_upload = None;
                         continue;
                     }
 
-                    // Get the path from the previous StartUpload (we need to track this)
-                    // For now, we'll just send UploadAck - proper implementation would require
-                    // state tracking between StartUpload and ConfirmResponse
-                    let response = crate::MessageEnvelope {
-                        session_id: session_id.clone(),
-                        payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
-                    };
-                    let _ = outgoing.send(response);
+                    // Use the tracked pending upload state to open the file
+                    if let Some((path, _size, _is_dir, _force)) = pending_upload.take() {
+                        let file_path = Path::new(&path);
+
+                        // Create parent directories if needed
+                        if let Some(parent) = file_path.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                        message: format!("Failed to create directories: {}", e),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                                continue;
+                            }
+                        }
+
+                        match std::fs::File::create(&path) {
+                            Ok(file) => {
+                                upload_file = Some(file);
+                                upload_path = Some(path);
+
+
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::UploadAck),
+                                };
+                                let _ = outgoing.send(response);
+                            }
+                            Err(e) => {
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                        message: format!("Failed to create file: {}", e),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                            }
+                        }
+                    } else {
+                        tracing::warn!(session_id = %session_id, "ConfirmResponse without pending upload");
+                    }
+                }
+                crate::ClientMessage::FileStart { relative_path, size } => {
+                    use std::io::Write;
+
+                    // Open a new file within a directory upload
+                    if let Some(ref base_path) = upload_base_path {
+                        let full_path = Path::new(base_path).join(&relative_path);
+
+                        // Create parent directories for nested files
+                        if let Some(parent) = full_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+
+                        tracing::debug!(session_id = %session_id, path = ?full_path, size = size,
+                            "Opening file within directory upload");
+
+                        match std::fs::File::create(&full_path) {
+                            Ok(file) => {
+                                upload_file = Some(file);
+                                upload_path = Some(full_path.to_string_lossy().to_string());
+                            }
+                            Err(e) => {
+                                tracing::error!(session_id = %session_id, path = ?full_path, error = %e,
+                                    "Failed to create file in directory upload");
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
+                                        message: format!("Failed to create file {}: {}", full_path.display(), e),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                            }
+                        }
+                    } else {
+                        tracing::warn!(session_id = %session_id, "FileStart received without directory upload context");
+                    }
                 }
                 crate::ClientMessage::FileChunk { data } => {
                     use std::io::Write;
@@ -2211,16 +2307,19 @@ impl KerrServer {
                             upload_path = None;
                         }
                     } else {
-                        tracing::warn!(session_id = %session_id, "Received file chunk without StartUpload");
+                        tracing::warn!(session_id = %session_id, "Received file chunk without active file");
                     }
                 }
                 crate::ClientMessage::EndUpload => {
                     if let Some(path) = &upload_path {
                         tracing::info!(session_id = %session_id, path = %path, "File upload completed");
                     }
-                    // Close the file and clear state
+                    // Close the file and clear all upload state
                     upload_file = None;
                     upload_path = None;
+                    upload_base_path = None;
+
+                    pending_upload = None;
                 }
                 crate::ClientMessage::RequestDownload { path, offset } => {
                     tracing::info!(session_id = %session_id, path = %path, offset = offset, "Client requested download");
@@ -2255,8 +2354,8 @@ impl KerrServer {
                         }
                     };
 
-                    // Validate offset
-                    if offset > total_size {
+                    // Validate offset (only meaningful for single-file downloads)
+                    if !is_dir && offset > total_size {
                         let response = crate::MessageEnvelope {
                             session_id: session_id.clone(),
                             payload: crate::MessagePayload::Server(crate::ServerMessage::Error {
@@ -2295,72 +2394,125 @@ impl KerrServer {
                         }
                     };
 
-                    // Send file chunks
                     use std::io::{Read, Seek, SeekFrom};
                     let mut bytes_sent = 0u64;
-                    let mut bytes_to_skip = offset;
 
-                    for file in files {
-                        let mut f = match std::fs::File::open(&file) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
-                                    "Failed to open file");
-                                continue;
-                            }
-                        };
+                    if is_dir {
+                        // Directory download: send FileStart before each file's data
+                        for file in &files {
+                            let relative = file.strip_prefix(file_path).unwrap_or(file);
+                            let relative_str = relative.to_string_lossy().to_string();
 
-                        // Get file size
-                        let file_size = match f.metadata() {
-                            Ok(metadata) => metadata.len(),
-                            Err(e) => {
-                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
-                                    "Failed to get file metadata");
-                                continue;
-                            }
-                        };
-
-                        // Skip this file if we need to skip more bytes than it contains
-                        if bytes_to_skip >= file_size {
-                            bytes_to_skip -= file_size;
-                            continue;
-                        }
-
-                        // Seek to the offset position if needed
-                        if bytes_to_skip > 0 {
-                            if let Err(e) = f.seek(SeekFrom::Start(bytes_to_skip)) {
-                                tracing::error!(session_id = %session_id, file = ?file, error = %e,
-                                    "Failed to seek to offset");
-                                continue;
-                            }
-                            bytes_to_skip = 0;
-                        }
-
-                        let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
-
-                        loop {
-                            let n = match f.read(&mut buffer) {
-                                Ok(n) => n,
+                            let file_size = match std::fs::metadata(file) {
+                                Ok(m) => m.len(),
                                 Err(e) => {
                                     tracing::error!(session_id = %session_id, file = ?file, error = %e,
-                                        "Failed to read file");
-                                    break;
+                                        "Failed to get file metadata");
+                                    continue;
                                 }
                             };
 
-                            if n == 0 {
-                                break;
-                            }
-
+                            // Send FileStart for this file
                             let response = crate::MessageEnvelope {
                                 session_id: session_id.clone(),
-                                payload: crate::MessagePayload::Server(crate::ServerMessage::FileChunk {
-                                    data: buffer[..n].to_vec(),
+                                payload: crate::MessagePayload::Server(crate::ServerMessage::FileStart {
+                                    relative_path: relative_str,
+                                    size: file_size,
                                 }),
                             };
                             let _ = outgoing.send(response);
 
-                            bytes_sent += n as u64;
+                            let mut f = match std::fs::File::open(file) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                        "Failed to open file");
+                                    continue;
+                                }
+                            };
+
+                            let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
+                            loop {
+                                let n = match f.read(&mut buffer) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                            "Failed to read file");
+                                        break;
+                                    }
+                                };
+                                if n == 0 { break; }
+
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::FileChunk {
+                                        data: buffer[..n].to_vec(),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                                bytes_sent += n as u64;
+                            }
+                        }
+                    } else {
+                        // Single file download with resume support
+                        let mut bytes_to_skip = offset;
+
+                        for file in &files {
+                            let mut f = match std::fs::File::open(file) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                        "Failed to open file");
+                                    continue;
+                                }
+                            };
+
+                            let file_size = match f.metadata() {
+                                Ok(metadata) => metadata.len(),
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                        "Failed to get file metadata");
+                                    continue;
+                                }
+                            };
+
+                            // Skip this file if we need to skip more bytes than it contains
+                            if bytes_to_skip >= file_size {
+                                bytes_to_skip -= file_size;
+                                continue;
+                            }
+
+                            // Seek to the offset position if needed
+                            if bytes_to_skip > 0 {
+                                if let Err(e) = f.seek(SeekFrom::Start(bytes_to_skip)) {
+                                    tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                        "Failed to seek to offset");
+                                    continue;
+                                }
+                                bytes_to_skip = 0;
+                            }
+
+                            let mut buffer = vec![0u8; crate::transfer::CHUNK_SIZE];
+                            loop {
+                                let n = match f.read(&mut buffer) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        tracing::error!(session_id = %session_id, file = ?file, error = %e,
+                                            "Failed to read file");
+                                        break;
+                                    }
+                                };
+                                if n == 0 { break; }
+
+                                let response = crate::MessageEnvelope {
+                                    session_id: session_id.clone(),
+                                    payload: crate::MessagePayload::Server(crate::ServerMessage::FileChunk {
+                                        data: buffer[..n].to_vec(),
+                                    }),
+                                };
+                                let _ = outgoing.send(response);
+                                bytes_sent += n as u64;
+                            }
                         }
                     }
 

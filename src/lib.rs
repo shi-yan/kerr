@@ -68,6 +68,8 @@ pub enum ClientMessage {
     FileChunk { data: Vec<u8> },
     /// End of file upload
     EndUpload,
+    /// Start of an individual file within a directory transfer
+    FileStart { relative_path: String, size: u64 },
     /// Confirmation response (true = yes, false = no)
     ConfirmResponse { confirmed: bool },
     /// Request file download (pull)
@@ -111,6 +113,8 @@ pub enum ServerMessage {
     FileChunk { data: Vec<u8> },
     /// End of file download
     EndDownload,
+    /// Start of an individual file within a directory transfer
+    FileStart { relative_path: String, size: u64 },
     /// Transfer progress
     Progress { bytes_transferred: u64, total_bytes: u64 },
     /// Directory listing response (for file browser)
