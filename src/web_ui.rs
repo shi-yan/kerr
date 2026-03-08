@@ -201,7 +201,7 @@ struct SessionCheckResponse {
 
 /// Initiate Google OAuth login by redirecting to Google
 async fn initiate_login(Query(params): Query<LoginParams>) -> Result<Response, (StatusCode, String)> {
-    use rand::Rng;
+    use rand::RngExt;
 
     // Generate state token for CSRF protection
     let mut rng = rand::rng();

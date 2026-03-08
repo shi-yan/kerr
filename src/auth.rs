@@ -4,7 +4,7 @@ use std::io::{self, BufRead};
 use std::fs;
 use std::path::PathBuf;
 use url::Url;
-use rand::Rng;
+use rand::RngExt;
 use n0_snafu::Result;
 use serde::{Deserialize, Serialize};
 use directories::ProjectDirs;

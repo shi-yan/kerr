@@ -127,7 +127,7 @@ fn key_event_to_bytes(event: crossterm::event::KeyEvent) -> Vec<u8> {
 }
 
 pub async fn run_client(connection_string: String) -> Result<()> {
-    use rand::Rng;
+    use rand::RngExt;
 
     // Decode the compressed connection string (base64 -> gzip -> JSON -> NodeAddr)
     let addr = crate::decode_connection_string(&connection_string)
@@ -336,7 +336,7 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
     use std::fs;
     use indicatif::{ProgressBar, ProgressStyle};
     use crate::transfer::{calculate_size, get_files_recursive, CHUNK_SIZE};
-    use rand::Rng;
+    use rand::RngExt;
 
     // Decode the compressed connection string (base64 -> gzip -> JSON)
     let addr = crate::decode_connection_string(&connection_string)
@@ -539,7 +539,7 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
     use std::fs;
     use std::io::Write;
     use indicatif::{ProgressBar, ProgressStyle};
-    use rand::Rng;
+    use rand::RngExt;
 
     // Check for existing resume metadata and validate before using
     let resume_metadata = read_resume_metadata(&local_path);
@@ -735,7 +735,7 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
     // Generate a unique session ID for this ping session
-    use rand::Rng;
+    use rand::RngExt;
     let session_id = format!("ping_{}", rand::rng().random::<u64>());
 
     // Send Hello message to indicate this is a ping test session
@@ -854,7 +854,7 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
 pub async fn browse_remote(connection_string: String) -> Result<()> {
     use std::sync::Arc;
     use std::path::PathBuf;
-    use rand::Rng;
+    use rand::RngExt;
 
     // Decode connection string
     let addr = crate::decode_connection_string(&connection_string)
@@ -914,7 +914,7 @@ pub async fn run_tcp_relay(
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use rand::Rng;
+    use rand::RngExt;
 
     // Decode connection string and connect to server
     let node_addr = crate::decode_connection_string(connection_string)
@@ -1160,7 +1160,7 @@ pub async fn run_proxy(
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use rand::Rng;
+    use rand::RngExt;
 
     // Decode connection string and connect to server
     let node_addr = crate::decode_connection_string(connection_string)

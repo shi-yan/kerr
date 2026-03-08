@@ -188,13 +188,13 @@ pub fn run_browser_with_fs(
                     // Split screen: top = two browsers side-by-side, bottom = status bar
                     let main_chunks = Layout::default()
                         .direction(Direction::Vertical)
-                        .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+                        .constraints([Constraint::Min(3), Constraint::Length(3)])
                         .split(f.area());
 
                     // Split top area into left and right browsers
                     let browser_chunks = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                         .split(main_chunks[0]);
 
                     // Render local file browser with highlight border if focused
@@ -855,12 +855,12 @@ fn render_text_preview(
     let chunks = if menu_visible {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0)].as_ref())
+            .constraints([Constraint::Min(0)])
             .split(area)
     };
 

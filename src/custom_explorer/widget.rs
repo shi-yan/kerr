@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListState, StatefulWidget, WidgetRef},
+    widgets::{Block, List, ListState, StatefulWidget, Widget},
 };
 
 use super::file_explorer::FileExplorer;
@@ -19,8 +19,8 @@ impl<'a> Renderer<'a> {
     }
 }
 
-impl WidgetRef for Renderer<'_> {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+impl Widget for &Renderer<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = self.explorer.theme();
         let files = self.explorer.files();
         let selected_idx = self.explorer.selected_idx();
@@ -51,7 +51,7 @@ impl WidgetRef for Renderer<'_> {
 
         let list = List::new(items)
             .highlight_style(highlight_style)
-            .highlight_symbol(&theme.highlight_symbol);
+            .highlight_symbol(theme.highlight_symbol.as_str());
 
         let list = if let Some(block) = &theme.block {
             list.block(block.clone())
