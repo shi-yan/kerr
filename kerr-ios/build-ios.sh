@@ -12,11 +12,7 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
-# Check if uniffi-bindgen is installed
-if ! command -v uniffi-bindgen &> /dev/null; then
-    echo "📦 Installing uniffi-bindgen..."
-    cargo install uniffi-bindgen --version 0.28
-fi
+UNIFFI_BINDGEN="cargo run --features=uniffi/cli --"
 
 # Add iOS targets if not already added
 echo "📱 Adding iOS targets..."
@@ -53,7 +49,7 @@ cp target/aarch64-apple-ios/release/libkerr_ios.a ../ios/Frameworks/libkerr_ios.
 
 # Generate Swift bindings
 echo "🔧 Generating Swift bindings..."
-uniffi-bindgen generate src/kerr_ios.udl --language swift --out-dir ../ios/Generated
+$UNIFFI_BINDGEN generate src/kerr_ios.udl --language swift --out-dir ../ios/Generated
 
 echo "✅ Build complete!"
 echo ""

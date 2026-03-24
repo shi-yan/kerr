@@ -8,7 +8,6 @@ use crossterm::{
     ExecutableCommand,
 };
 use crate::{ClientMessage, ServerMessage, ALPN};
-use bincode::config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -135,7 +134,7 @@ pub async fn run_client(connection_string: String) -> Result<()> {
 
     println!("Connecting to: {}", addr.id);
 
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Open a connection to the accepting node
     println!("Connecting to Kerr server...");
@@ -343,7 +342,7 @@ pub async fn send_file(connection_string: String, local_path: String, remote_pat
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
@@ -574,7 +573,7 @@ pub async fn pull_file(connection_string: String, remote_path: String, local_pat
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
@@ -730,7 +729,7 @@ pub async fn ping_test(connection_string: String) -> Result<()> {
         .expect("Failed to decode connection string");
 
     println!("Connecting to server...");
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let (mut send, mut recv) = conn.open_bi().await.e()?;
 
@@ -861,7 +860,7 @@ pub async fn browse_remote(connection_string: String) -> Result<()> {
         .expect("Failed to decode connection string");
 
     println!("Connecting to server for file browsing...");
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
     let conn = endpoint.connect(addr, ALPN).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     let (mut send, recv) = conn.open_bi().await.e()?;
@@ -920,7 +919,7 @@ pub async fn run_tcp_relay(
     let node_addr = crate::decode_connection_string(connection_string)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
 
-    let endpoint = iroh::Endpoint::bind()
+    let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0)
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
 
@@ -1166,7 +1165,7 @@ pub async fn run_proxy(
     let node_addr = crate::decode_connection_string(connection_string)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
 
-    let endpoint = iroh::Endpoint::bind()
+    let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0)
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
 
@@ -1481,8 +1480,7 @@ async fn start_dns_proxy_task(conn: iroh::endpoint::Connection) -> Result<()> {
     let hello = crate::ClientMessage::Hello {
         session_type: crate::SessionType::Dns,
     };
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config)
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&hello)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
     let len = (encoded.len() as u32).to_be_bytes();
     send.write_all(&len).await
@@ -1509,7 +1507,6 @@ async fn start_dns_proxy_task(conn: iroh::endpoint::Connection) -> Result<()> {
     // Task to handle incoming DNS responses from server
     let pending_queries_clone = Arc::clone(&pending_queries);
     let _recv_task = tokio::spawn(async move {
-        let config = bincode::config::standard();
         loop {
             // Read message length
             let mut len_bytes = [0u8; 4];
@@ -1525,7 +1522,9 @@ async fn start_dns_proxy_task(conn: iroh::endpoint::Connection) -> Result<()> {
             }
 
             // Decode message
-            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+            let msg: crate::ServerMessage = match rkyv::access::<rkyv::Archived<crate::ServerMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ServerMessage, rkyv::rancor::Error>(archived))
+            {
                 Ok(m) => m,
                 Err(_) => break,
             };
@@ -1592,8 +1591,7 @@ async fn start_dns_proxy_task(conn: iroh::endpoint::Connection) -> Result<()> {
             query_data,
         };
 
-        let config = bincode::config::standard();
-        let encoded = match bincode::encode_to_vec(&dns_msg, config) {
+        let encoded = match rkyv::to_bytes::<rkyv::rancor::Error>(&dns_msg) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("Failed to encode DnsQuery: {}", e);
@@ -1637,7 +1635,7 @@ pub async fn run_dns_proxy(
     let node_addr = crate::decode_connection_string(connection_string)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to decode connection string: {}", e)))?;
 
-    let endpoint = iroh::Endpoint::bind()
+    let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0)
         .await
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to create endpoint: {}", e)))?;
 
@@ -1653,8 +1651,7 @@ pub async fn run_dns_proxy(
     let hello = crate::ClientMessage::Hello {
         session_type: crate::SessionType::Dns,
     };
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(&hello, config)
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&hello)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to encode hello: {}", e)))?;
     let len = (encoded.len() as u32).to_be_bytes();
     send.write_all(&len).await
@@ -1683,7 +1680,6 @@ pub async fn run_dns_proxy(
     // Task to handle incoming DNS responses from server
     let pending_queries_clone = Arc::clone(&pending_queries);
     let _recv_task = tokio::spawn(async move {
-        let config = bincode::config::standard();
         loop {
             // Read message length
             let mut len_bytes = [0u8; 4];
@@ -1699,7 +1695,9 @@ pub async fn run_dns_proxy(
             }
 
             // Decode message
-            let (msg, _): (crate::ServerMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+            let msg: crate::ServerMessage = match rkyv::access::<rkyv::Archived<crate::ServerMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ServerMessage, rkyv::rancor::Error>(archived))
+            {
                 Ok(m) => m,
                 Err(_) => break,
             };
@@ -1770,8 +1768,7 @@ pub async fn run_dns_proxy(
             query_data,
         };
 
-        let config = bincode::config::standard();
-        let encoded = match bincode::encode_to_vec(&dns_msg, config) {
+        let encoded = match rkyv::to_bytes::<rkyv::rancor::Error>(&dns_msg) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("Failed to encode DnsQuery: {}", e);

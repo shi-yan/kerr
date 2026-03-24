@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use crate::{KerrError, Session, decode_addr, encode_addr, ALPN};
 
 pub struct Endpoint {
@@ -8,7 +7,7 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub async fn new() -> Result<Arc<Self>, KerrError> {
-        let endpoint = iroh::endpoint::Endpoint::bind()
+        let endpoint = iroh::endpoint::Endpoint::bind(iroh::endpoint::presets::N0)
             .await
             .map_err(|e| KerrError::ConnectionFailed(e.to_string()))?;
 
@@ -36,22 +35,7 @@ impl Endpoint {
     }
 
     pub fn connection_string(&self) -> Result<String, KerrError> {
-        let runtime = crate::get_runtime();
-        runtime.block_on(async {
-            let node_id = self.inner.node_id();
-            let local_addrs: Vec<_> = self
-                .inner
-                .local_endpoints()
-                .await
-                .map_err(|e| KerrError::NetworkError(e.to_string()))?
-                .into_iter()
-                .map(|endpoint| endpoint.addr)
-                .collect();
-
-            let addr = iroh::endpoint::NodeAddr::new(node_id)
-                .with_direct_addresses(local_addrs);
-
-            encode_addr(&addr)
-        })
+        let addr = self.inner.addr();
+        encode_addr(&addr)
     }
 }

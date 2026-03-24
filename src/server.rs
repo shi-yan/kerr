@@ -59,7 +59,7 @@ pub async fn run_server(register_alias: Option<String>, session_path: Option<Str
     crate::auth::print_session_status(session_path);
     println!();
 
-    let endpoint = Endpoint::bind().await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
+    let endpoint = Endpoint::bind(iroh::endpoint::presets::N0).await.map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("{}", e)))?;
 
     // Build our protocol handler and add our protocol, identified by its ALPN, and spawn the node.
     let router = Router::builder(endpoint).accept(ALPN.to_vec(), KerrServer).spawn();
@@ -587,7 +587,6 @@ impl KerrServer {
         let pty_to_client = tokio::spawn(async move {
             debug_log::log_pty_task_started(&session_id_pty);
             let mut buffer = [0u8; 8192];
-            let config = bincode::config::standard();
             let mut pty_ended = false;
             let mut total_bytes_read = 0;
             let mut read_count = 0;
@@ -604,7 +603,7 @@ impl KerrServer {
                         let msg = ServerMessage::Error {
                             message: "Session ended: bash exited".to_string(),
                         };
-                        if let Ok(encoded) = bincode::encode_to_vec(&msg, config) {
+                        if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&msg) {
                             let len = (encoded.len() as u32).to_be_bytes();
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
@@ -625,7 +624,7 @@ impl KerrServer {
                         let msg = ServerMessage::Output {
                             data: buffer[..n].to_vec(),
                         };
-                        match bincode::encode_to_vec(&msg, config) {
+                        match rkyv::to_bytes::<rkyv::rancor::Error>(&msg) {
                             Ok(encoded) => {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
@@ -660,7 +659,6 @@ impl KerrServer {
         });
 
         // Main loop: receive from client and write to PTY, or exit if PTY ends
-        let config = bincode::config::standard();
 
         loop {
             tokio::select! {
@@ -693,8 +691,10 @@ impl KerrServer {
                         Some(msg_bytes) => {
                             debug_log::log_decode_start(session_id, msg_bytes.len());
                             // Deserialize message
-                            let msg: ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                                Ok((m, _)) => {
+                            let msg: ClientMessage = match rkyv::access::<rkyv::Archived<ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                                .and_then(|archived| rkyv::deserialize::<ClientMessage, rkyv::rancor::Error>(archived))
+                            {
+                                Ok(m) => {
                                     debug_log::log_decode_done(session_id, "ClientMessage");
                                     m
                                 },
@@ -924,8 +924,6 @@ impl KerrServer {
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<(), AcceptError> {
-        let config = bincode::config::standard();
-
         // Channel to coordinate sending data back to client
         let (send_tx, mut send_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -958,8 +956,10 @@ impl KerrServer {
             }
 
             // Deserialize message
-            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                Ok((m, _)) => m,
+            let msg: crate::ClientMessage = match rkyv::access::<rkyv::Archived<crate::ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ClientMessage, rkyv::rancor::Error>(archived))
+            {
+                Ok(m) => m,
                 Err(e) => {
                     eprintln!("\r\nFailed to deserialize message: {}\r", e);
                     continue;
@@ -978,7 +978,7 @@ impl KerrServer {
                         let prompt_msg = crate::ServerMessage::ConfirmPrompt {
                             message: format!("File '{}' already exists. Overwrite?", path),
                         };
-                        if let Ok(encoded) = bincode::encode_to_vec(&prompt_msg, config) {
+                        if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&prompt_msg) {
                             let len = (encoded.len() as u32).to_be_bytes();
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
@@ -997,8 +997,10 @@ impl KerrServer {
                             break;
                         }
 
-                        let confirm_msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                            Ok((m, _)) => m,
+                        let confirm_msg: crate::ClientMessage = match rkyv::access::<rkyv::Archived<crate::ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                            .and_then(|archived| rkyv::deserialize::<crate::ClientMessage, rkyv::rancor::Error>(archived))
+                        {
+                            Ok(m) => m,
                             Err(e) => {
                                 eprintln!("\r\nFailed to deserialize confirmation: {}\r", e);
                                 continue;
@@ -1024,7 +1026,7 @@ impl KerrServer {
                             message: format!("Target path is an existing directory: {}. Please specify a filename or use a path with trailing /", path),
                         };
                         eprintln!("\r\nError: Target path is an existing directory: {}\r", path);
-                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                        if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                             let len = (encoded.len() as u32).to_be_bytes();
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
@@ -1043,7 +1045,7 @@ impl KerrServer {
                             let err_msg = crate::ServerMessage::Error {
                                 message: format!("Failed to create directories: {}", e),
                             };
-                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1062,7 +1064,7 @@ impl KerrServer {
 
                             // Send acknowledgment
                             let ack_msg = crate::ServerMessage::UploadAck;
-                            if let Ok(encoded) = bincode::encode_to_vec(&ack_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1075,7 +1077,7 @@ impl KerrServer {
                             let err_msg = crate::ServerMessage::Error {
                                 message: format!("Failed to create file: {}", e),
                             };
-                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1093,7 +1095,7 @@ impl KerrServer {
                             let err_msg = crate::ServerMessage::Error {
                                 message: format!("Failed to write to file: {}", e),
                             };
-                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1126,7 +1128,7 @@ impl KerrServer {
                             message: format!("Path does not exist: {}", path),
                         };
                         eprintln!("\r\nError: Path does not exist: {}\r", path);
-                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                        if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                             let len = (encoded.len() as u32).to_be_bytes();
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
@@ -1146,7 +1148,7 @@ impl KerrServer {
                                 message: format!("Failed to calculate size: {}", e),
                             };
                             eprintln!("\r\nError calculating size: {}\r", e);
-                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1163,7 +1165,7 @@ impl KerrServer {
                             message: format!("Offset {} exceeds file size {}", offset, total_size),
                         };
                         eprintln!("\r\nError: Offset {} exceeds file size {}\r", offset, total_size);
-                        if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                        if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                             let len = (encoded.len() as u32).to_be_bytes();
                             let mut full_msg = Vec::new();
                             full_msg.extend_from_slice(&len);
@@ -1180,7 +1182,7 @@ impl KerrServer {
                         size: total_size,
                         is_dir,
                     };
-                    if let Ok(encoded) = bincode::encode_to_vec(&start_msg, config) {
+                    if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&start_msg) {
                         let len = (encoded.len() as u32).to_be_bytes();
                         let mut full_msg = Vec::new();
                         full_msg.extend_from_slice(&len);
@@ -1196,7 +1198,7 @@ impl KerrServer {
                                 message: format!("Failed to read files: {}", e),
                             };
                             eprintln!("\r\nError reading files: {}\r", e);
-                            if let Ok(encoded) = bincode::encode_to_vec(&err_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&err_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1264,7 +1266,7 @@ impl KerrServer {
                                 data: buffer[..n].to_vec(),
                             };
 
-                            if let Ok(encoded) = bincode::encode_to_vec(&chunk_msg, config) {
+                            if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&chunk_msg) {
                                 let len = (encoded.len() as u32).to_be_bytes();
                                 let mut full_msg = Vec::new();
                                 full_msg.extend_from_slice(&len);
@@ -1278,7 +1280,7 @@ impl KerrServer {
 
                     // Send EndDownload message
                     let end_msg = crate::ServerMessage::EndDownload;
-                    if let Ok(encoded) = bincode::encode_to_vec(&end_msg, config) {
+                    if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&end_msg) {
                         let len = (encoded.len() as u32).to_be_bytes();
                         let mut full_msg = Vec::new();
                         full_msg.extend_from_slice(&len);
@@ -1312,8 +1314,6 @@ impl KerrServer {
     ) -> Result<(), AcceptError> {
         use std::path::Path;
 
-        let config = bincode::config::standard();
-
         println!("\r\nFile browser session started for {node_id}\r");
 
         loop {
@@ -1333,7 +1333,9 @@ impl KerrServer {
             }
 
             // Deserialize message
-            let (msg, _): (crate::ClientMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+            let msg: crate::ClientMessage = match rkyv::access::<rkyv::Archived<crate::ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ClientMessage, rkyv::rancor::Error>(archived))
+            {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("\r\nFailed to deserialize message: {}\r", e);
@@ -1521,7 +1523,7 @@ impl KerrServer {
             };
 
             // Send response
-            match bincode::encode_to_vec(&response, config) {
+            match rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
                 Ok(encoded) => {
                     let len = (encoded.len() as u32).to_be_bytes();
                     if let Err(e) = send.write_all(&len).await {
@@ -1831,8 +1833,6 @@ impl KerrServer {
         // Wrap send stream in Arc<Mutex> for sharing between tasks
         let send = Arc::new(Mutex::new(send));
 
-        let config = bincode::config::standard();
-
         // Main loop to handle client messages
 
         loop {
@@ -1851,7 +1851,9 @@ impl KerrServer {
             }
 
             // Decode message
-            let (msg, _): (crate::ClientMessage, _) = match bincode::decode_from_slice(&msg_bytes, config) {
+            let msg: crate::ClientMessage = match rkyv::access::<rkyv::Archived<crate::ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ClientMessage, rkyv::rancor::Error>(archived))
+            {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("\r\nFailed to decode message: {}\r", e);
@@ -1873,7 +1875,7 @@ impl KerrServer {
                                 success: true,
                                 error: None,
                             };
-                            let encoded = match bincode::encode_to_vec(&response, config) {
+                            let encoded = match rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
                                 Ok(e) => e,
                                 Err(e) => {
                                     eprintln!("\r\nFailed to encode TcpOpenResponse: {}\r", e);
@@ -1917,8 +1919,7 @@ impl KerrServer {
                                                         stream_id,
                                                         data: buf[..n].to_vec(),
                                                     };
-                                                    let config = bincode::config::standard();
-                                                    let encoded = match bincode::encode_to_vec(&response, config) {
+                                                    let encoded = match rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
                                                         Ok(e) => e,
                                                         Err(_) => break,
                                                     };
@@ -1958,8 +1959,7 @@ impl KerrServer {
                                     stream_id,
                                     error: None,
                                 };
-                                let config = bincode::config::standard();
-                                if let Ok(encoded) = bincode::encode_to_vec(&close_response, config) {
+                                if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&close_response) {
                                     let len = (encoded.len() as u32).to_be_bytes();
                                     let mut send_locked = send_for_task.lock().await;
                                     let _ = send_locked.write_all(&len).await;
@@ -1979,7 +1979,7 @@ impl KerrServer {
                                 success: false,
                                 error: Some(format!("Failed to connect: {}", e)),
                             };
-                            let encoded = match bincode::encode_to_vec(&response, config) {
+                            let encoded = match rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
                                 Ok(e) => e,
                                 Err(e) => {
                                     eprintln!("\r\nFailed to encode error response: {}\r", e);
@@ -2027,8 +2027,6 @@ impl KerrServer {
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<(), AcceptError> {
-        let config = bincode::config::standard();
-
         println!("\r\nPing session started for {node_id}\r");
 
         loop {
@@ -2046,8 +2044,10 @@ impl KerrServer {
             }
 
             // Deserialize message
-            let msg: crate::ClientMessage = match bincode::decode_from_slice(&msg_bytes, config) {
-                Ok((m, _)) => m,
+            let msg: crate::ClientMessage = match rkyv::access::<rkyv::Archived<crate::ClientMessage>, rkyv::rancor::Error>(&msg_bytes)
+                .and_then(|archived| rkyv::deserialize::<crate::ClientMessage, rkyv::rancor::Error>(archived))
+            {
+                Ok(m) => m,
                 Err(e) => {
                     eprintln!("\r\nFailed to deserialize message: {}\r", e);
                     continue;
@@ -2059,7 +2059,7 @@ impl KerrServer {
                     // Echo the data back
                     let response = crate::ServerMessage::PingResponse { data };
 
-                    if let Ok(encoded) = bincode::encode_to_vec(&response, config) {
+                    if let Ok(encoded) = rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
                         let len = (encoded.len() as u32).to_be_bytes();
                         if send.write_all(&len).await.is_err() {
                             break;
@@ -2093,8 +2093,6 @@ impl KerrServer {
         use std::path::Path;
 
         tracing::info!(session_id = %session_id, "File transfer session started (mux mode)");
-
-        let config = bincode::config::standard();
 
         // File upload state
         let mut upload_file: Option<std::fs::File> = None;

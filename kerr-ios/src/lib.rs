@@ -1,11 +1,9 @@
 use std::sync::Arc;
-use std::path::{Path, PathBuf};
-use tokio::sync::Mutex;
 use anyhow::Result;
 
 // Include the kerr core types
 // We'll need to reference the parent crate
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 mod types;
 mod endpoint;
@@ -50,7 +48,7 @@ pub fn decode_connection_string(conn_str: String) -> Result<String, KerrError> {
 }
 
 // Helper to decode connection string (from parent crate logic)
-fn decode_addr(conn_str: &str) -> Result<iroh::endpoint::NodeAddr, KerrError> {
+fn decode_addr(conn_str: &str) -> Result<iroh::EndpointAddr, KerrError> {
     // Decode base64
     let compressed = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -67,7 +65,7 @@ fn decode_addr(conn_str: &str) -> Result<iroh::endpoint::NodeAddr, KerrError> {
         .map_err(|_| KerrError::InvalidConnectionString)?;
 
     // Deserialize
-    let addr: iroh::endpoint::NodeAddr = serde_json::from_str(&json_str)
+    let addr: iroh::EndpointAddr = serde_json::from_str(&json_str)
         .map_err(|_| KerrError::InvalidConnectionString)?;
 
     Ok(addr)
@@ -75,17 +73,17 @@ fn decode_addr(conn_str: &str) -> Result<iroh::endpoint::NodeAddr, KerrError> {
 
 // Helper to encode connection string
 #[allow(dead_code)]
-fn encode_addr(addr: &iroh::endpoint::NodeAddr) -> Result<String, KerrError> {
+fn encode_addr(addr: &iroh::EndpointAddr) -> Result<String, KerrError> {
     use std::io::Write;
 
     let json_str = serde_json::to_string(addr)
-        .map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
 
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder
         .write_all(json_str.as_bytes())
-        .map_err(|_| KerrError::NetworkError)?;
-    let compressed = encoder.finish().map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
+    let compressed = encoder.finish().map_err(|e| KerrError::NetworkError(e.to_string()))?;
 
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &compressed);
     Ok(encoded)
@@ -94,7 +92,8 @@ fn encode_addr(addr: &iroh::endpoint::NodeAddr) -> Result<String, KerrError> {
 // Message types (copied from parent crate - we need these for protocol)
 const ALPN: &[u8] = b"kerr/0";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum SessionType {
     Shell,
     FileTransfer,
@@ -105,19 +104,22 @@ pub enum SessionType {
     Dns,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub struct MessageEnvelope {
     pub session_id: String,
     pub payload: MessagePayload,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum MessagePayload {
     Client(ClientMessage),
     Server(ServerMessage),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ClientMessage {
     Hello { session_type: SessionType },
     Input { data: Vec<u8> },
@@ -130,7 +132,8 @@ pub enum ClientMessage {
     FileExists { path: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ServerMessage {
     Output { data: Vec<u8> },
     Error { message: String },
@@ -141,7 +144,8 @@ pub enum ServerMessage {
     Exists { exists: bool },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub struct RemoteFileEntry {
     pub name: String,
     pub path: String,
@@ -150,11 +154,12 @@ pub struct RemoteFileEntry {
     pub metadata: Option<RemoteFileMetadata>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub struct RemoteFileMetadata {
     pub size: u64,
-    pub created: Option<std::time::SystemTime>,
-    pub modified: Option<std::time::SystemTime>,
+    pub created: Option<u64>,   // Unix timestamp in seconds
+    pub modified: Option<u64>,  // Unix timestamp in seconds
     pub is_dir: bool,
 }
 
@@ -163,14 +168,15 @@ async fn send_envelope(
     send: &mut iroh::endpoint::SendStream,
     envelope: &MessageEnvelope,
 ) -> Result<(), KerrError> {
-    let data = bincode::serialize(envelope).map_err(|_| KerrError::NetworkError)?;
+    let data = rkyv::to_bytes::<rkyv::rancor::Error>(envelope)
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     let len = data.len() as u32;
     send.write_all(&len.to_le_bytes())
         .await
-        .map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     send.write_all(&data)
         .await
-        .map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     Ok(())
 }
 
@@ -183,15 +189,17 @@ async fn recv_envelope(
     let mut len_bytes = [0u8; 4];
     recv.read_exact(&mut len_bytes)
         .await
-        .map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     let len = u32::from_le_bytes(len_bytes) as usize;
 
     let mut data = vec![0u8; len];
     recv.read_exact(&mut data)
         .await
-        .map_err(|_| KerrError::NetworkError)?;
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
 
-    let envelope: MessageEnvelope = bincode::deserialize(&data)
-        .map_err(|_| KerrError::NetworkError)?;
+    let archived = rkyv::access::<rkyv::Archived<MessageEnvelope>, rkyv::rancor::Error>(&data)
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
+    let envelope = rkyv::deserialize::<MessageEnvelope, rkyv::rancor::Error>(archived)
+        .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     Ok(envelope)
 }

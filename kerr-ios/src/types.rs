@@ -1,4 +1,3 @@
-use std::fmt;
 
 // Error type exposed to Swift via UniFFI
 #[derive(Debug, thiserror::Error)]
@@ -54,16 +53,8 @@ impl FileMetadata {
     pub fn from_remote(remote: &crate::RemoteFileMetadata) -> Self {
         Self {
             size: remote.size,
-            created_timestamp: remote.created.map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            }),
-            modified_timestamp: remote.modified.map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            }),
+            created_timestamp: remote.created,
+            modified_timestamp: remote.modified,
             is_dir: remote.is_dir,
         }
     }

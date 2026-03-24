@@ -48,7 +48,7 @@ struct AppState {
 /// Run the web UI server
 pub async fn run_web_ui(connection_string: Option<String>, port: u16) -> Result<()> {
     // Create endpoint for future connections
-    let endpoint = iroh::endpoint::Endpoint::bind().await?;
+    let endpoint = iroh::endpoint::Endpoint::bind(iroh::endpoint::presets::N0).await?;
 
     // If connection string is provided, connect immediately
     let (node_addr, connection, remote_fs, conn_str_stored, conn_alias) = if let Some(conn_str) = connection_string {

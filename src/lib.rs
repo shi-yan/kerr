@@ -1,4 +1,4 @@
-use bincode::{Decode, Encode};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use base64::Engine;
 
 pub mod server;
@@ -14,7 +14,8 @@ pub mod web_ui;
 pub mod logging;
 
 /// Session type for initial handshake
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum SessionType {
     /// Interactive shell session
     Shell,
@@ -34,7 +35,8 @@ pub enum SessionType {
 
 /// Message envelope for multiplexing multiple sessions over a single stream
 /// Each message includes a session_id to route it to the correct handler
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub struct MessageEnvelope {
     /// Unique identifier for this session (e.g., "shell_1", "browser_1")
     pub session_id: String,
@@ -43,7 +45,8 @@ pub struct MessageEnvelope {
 }
 
 /// Wrapper for client/server messages to enable bidirectional multiplexing
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum MessagePayload {
     /// Message from client to server
     Client(ClientMessage),
@@ -52,7 +55,8 @@ pub enum MessagePayload {
 }
 
 /// Messages sent from client to server
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ClientMessage {
     /// Initial handshake with session type
     Hello { session_type: SessionType },
@@ -97,7 +101,8 @@ pub enum ClientMessage {
 }
 
 /// Messages sent from server to client
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ServerMessage {
     /// Output from the PTY
     Output { data: Vec<u8> },
@@ -181,13 +186,13 @@ pub fn decode_connection_string(connection_string: &str) -> Result<iroh::Endpoin
 }
 
 /// Helper to send an enveloped message over a QUIC stream
-/// Format: 4-byte length prefix + bincode-encoded MessageEnvelope
+/// Format: 4-byte length prefix + rkyv-encoded MessageEnvelope
 pub async fn send_envelope(
     send: &mut iroh::endpoint::SendStream,
     envelope: &MessageEnvelope,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = bincode::config::standard();
-    let encoded = bincode::encode_to_vec(envelope, config)?;
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(envelope)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     let len = (encoded.len() as u32).to_be_bytes();
 
     send.write_all(&len).await?;
@@ -197,12 +202,10 @@ pub async fn send_envelope(
 }
 
 /// Helper to receive an enveloped message from a QUIC stream
-/// Format: 4-byte length prefix + bincode-encoded MessageEnvelope
+/// Format: 4-byte length prefix + rkyv-encoded MessageEnvelope
 pub async fn recv_envelope(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> Result<MessageEnvelope, Box<dyn std::error::Error>> {
-    let config = bincode::config::standard();
-
     // Read length prefix
     let mut len_bytes = [0u8; 4];
     recv.read_exact(&mut len_bytes).await?;
@@ -213,7 +216,10 @@ pub async fn recv_envelope(
     recv.read_exact(&mut msg_bytes).await?;
 
     // Decode envelope
-    let (envelope, _): (MessageEnvelope, _) = bincode::decode_from_slice(&msg_bytes, config)?;
+    let archived = rkyv::access::<rkyv::Archived<MessageEnvelope>, rkyv::rancor::Error>(&msg_bytes)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let envelope: MessageEnvelope = rkyv::deserialize::<MessageEnvelope, rkyv::rancor::Error>(archived)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(envelope)
 }
