@@ -10,32 +10,51 @@ class ConnectionManager: ObservableObject {
     private var session: Session?
     private var fileBrowser: FileBrowser?
 
-    func connect(connectionString: String) {
+    func connect(connectionString: String, completion: ((String?) -> Void)? = nil) {
         connectionStatus = "Connecting..."
         errorMessage = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                // Create endpoint
+                print("[Kerr] Creating endpoint...")
                 let endpoint = try createEndpoint()
                 self?.endpoint = endpoint
+                print("[Kerr] Endpoint created. Connecting...")
 
-                // Connect to remote
                 let session = try endpoint.connect(connectionString: connectionString)
                 self?.session = session
+                print("[Kerr] Connected successfully.")
 
                 DispatchQueue.main.async {
                     self?.isConnected = true
                     self?.connectionStatus = "Connected"
+                    completion?(nil)
                 }
-            } catch {
+            } catch let e as KerrError {
+                let msg = Self.describe(e)
+                print("[Kerr] Connection error: \(msg)")
                 DispatchQueue.main.async {
-                    self?.errorMessage = "Connection failed: \(error.localizedDescription)"
+                    self?.errorMessage = msg
                     self?.connectionStatus = "Failed"
                     self?.isConnected = false
+                    completion?(msg)
+                }
+            } catch {
+                let msg = "Unexpected error: \(error)"
+                print("[Kerr] \(msg)")
+                DispatchQueue.main.async {
+                    self?.errorMessage = msg
+                    self?.connectionStatus = "Failed"
+                    self?.isConnected = false
+                    completion?(msg)
                 }
             }
         }
+    }
+
+    private static func describe(_ error: KerrError) -> String {
+        // The Rust Display impl already contains the full message; just return it.
+        return error.localizedDescription
     }
 
     func disconnect() {

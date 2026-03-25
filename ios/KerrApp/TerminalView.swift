@@ -1,192 +1,201 @@
 import SwiftUI
-// import SwiftTerm  // You'll add this after adding SwiftTerm via Swift Package Manager
+import SwiftTerm
+
+// MARK: - Terminal View (SwiftUI)
 
 struct TerminalView: View {
     @ObservedObject var connectionManager: ConnectionManager
-    @StateObject private var terminalController = TerminalController()
+    @StateObject private var controller = TerminalController()
 
     var body: some View {
-        VStack {
-            if terminalController.isActive {
-                // TODO: Integrate SwiftTerm here
-                // TerminalViewRepresentable(controller: terminalController)
-                //     .edgesIgnoringSafeArea(.all)
+        if controller.isActive {
+            ZStack(alignment: .topTrailing) {
+                SwiftTermRepresentable(controller: controller)
+                    .ignoresSafeArea()
 
-                // Placeholder until SwiftTerm is integrated
-                VStack {
-                    ScrollView {
-                        Text(terminalController.outputBuffer)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                    }
-                    .background(Color.black)
-                    .foregroundColor(.green)
-
-                    HStack {
-                        TextField("Enter command", text: $terminalController.inputBuffer)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-
-                        Button("Send") {
-                            terminalController.sendInput()
-                        }
-                    }
-                    .padding()
+                Button(action: { controller.stop() }) {
+                    Text("Disconnect")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.red)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.7))
+                        .clipShape(Capsule())
                 }
-            } else {
-                VStack(spacing: 20) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 60))
-                        .foregroundColor(.green)
-
-                    Text("Terminal")
-                        .font(.title)
-
-                    if let error = terminalController.errorMessage {
-                        Text(error)
-                            .foregroundColor(.red)
-                            .padding()
-                    }
-
-                    Button(action: {
-                        startTerminal()
-                    }) {
-                        Label("Start Shell", systemImage: "play.circle")
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                    .padding()
-                }
+                .padding(.top, 56)
+                .padding(.trailing, 12)
             }
+            .ignoresSafeArea()
+            .toolbar(.hidden, for: .navigationBar)
+        } else {
+            idleView
+                .navigationTitle("Terminal")
+                .navigationBarTitleDisplayMode(.inline)
         }
-        .navigationTitle("Terminal")
-        .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func startTerminal() {
+    private var idleView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            Image(systemName: "terminal.fill")
+                .font(.system(size: 64))
+                .foregroundColor(.green)
+
+            Text("Remote Shell")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            if let err = controller.errorMessage {
+                Text(err)
+                    .font(.callout)
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.center)
+                    .padding()
+                    .background(Color.red.opacity(0.1))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+            }
+
+            Button(action: startShell) {
+                Label("Start Shell", systemImage: "play.circle.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal)
+
+            Spacer()
+        }
+    }
+
+    private func startShell() {
         guard let session = connectionManager.getSession() else {
-            terminalController.errorMessage = "Not connected"
+            controller.errorMessage = "Not connected"
             return
         }
-
         do {
-            try terminalController.start(session: session)
+            try controller.start(session: session)
         } catch {
-            terminalController.errorMessage = "Failed to start terminal: \(error.localizedDescription)"
+            controller.errorMessage = error.localizedDescription
         }
     }
 }
 
-class TerminalController: ObservableObject, ShellCallback {
-    @Published var isActive = false
-    @Published var outputBuffer = ""
-    @Published var inputBuffer = ""
-    @Published var errorMessage: String?
+// MARK: - UIViewRepresentable
 
-    private var shellSession: ShellSession?
-
-    func start(session: Session) throws {
-        // Start shell with self as callback
-        shellSession = try session.startShell(callback: self)
-        isActive = true
-        errorMessage = nil
-        outputBuffer = "Shell started...\n"
-    }
-
-    func sendInput() {
-        guard let shell = shellSession, !inputBuffer.isEmpty else {
-            return
-        }
-
-        do {
-            try shell.sendInput(data: inputBuffer + "\n")
-            inputBuffer = ""
-        } catch {
-            errorMessage = "Failed to send input: \(error.localizedDescription)"
-        }
-    }
-
-    func resize(cols: UInt16, rows: UInt16) {
-        guard let shell = shellSession else {
-            return
-        }
-
-        do {
-            try shell.resize(cols: cols, rows: rows)
-        } catch {
-            errorMessage = "Failed to resize: \(error.localizedDescription)"
-        }
-    }
-
-    func stop() {
-        shellSession?.close()
-        shellSession = nil
-        isActive = false
-    }
-
-    // MARK: - ShellCallback
-
-    func onOutput(data: String) {
-        DispatchQueue.main.async {
-            self.outputBuffer += data
-        }
-    }
-
-    func onError(message: String) {
-        DispatchQueue.main.async {
-            self.errorMessage = message
-            self.outputBuffer += "\nError: \(message)\n"
-        }
-    }
-
-    func onClose() {
-        DispatchQueue.main.async {
-            self.isActive = false
-            self.outputBuffer += "\nShell closed.\n"
-        }
-    }
-}
-
-// TODO: When SwiftTerm is integrated, create this representable
-/*
-struct TerminalViewRepresentable: UIViewRepresentable {
+struct SwiftTermRepresentable: UIViewRepresentable {
     let controller: TerminalController
 
-    func makeUIView(context: Context) -> TerminalView {
-        let terminalView = TerminalView(frame: .zero)
-        terminalView.terminalDelegate = context.coordinator
-        return terminalView
+    func makeUIView(context: Context) -> SwiftTerm.TerminalView {
+        let tv = SwiftTerm.TerminalView(frame: .zero)
+        tv.terminalDelegate = context.coordinator
+        tv.nativeBackgroundColor = .black
+        controller.attachTerminalView(tv)
+        // Become first responder so the software keyboard appears
+        DispatchQueue.main.async {
+            tv.becomeFirstResponder()
+        }
+        return tv
     }
 
-    func updateUIView(_ uiView: TerminalView, context: Context) {
-        // Update as needed
-    }
+    func updateUIView(_ uiView: SwiftTerm.TerminalView, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller)
     }
 
-    class Coordinator: NSObject, TerminalViewDelegate {
+    final class Coordinator: NSObject, SwiftTerm.TerminalViewDelegate {
         let controller: TerminalController
 
         init(controller: TerminalController) {
             self.controller = controller
         }
 
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            let string = String(bytes: data, encoding: .utf8) ?? ""
-            controller.inputBuffer = string
-            controller.sendInput()
+        // User typed on the keyboard — forward raw bytes to the remote shell.
+        func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
+            guard let shell = controller.shellSession else { return }
+            if let str = String(bytes: data, encoding: .utf8) {
+                try? shell.sendInput(data: str)
+            }
         }
 
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            controller.resize(cols: UInt16(newCols), rows: UInt16(newRows))
+        // Terminal was resized — tell the remote PTY.
+        func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
+            try? controller.shellSession?.resize(cols: UInt16(newCols), rows: UInt16(newRows))
+        }
+
+        func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
+        func requestOpenLink(source: SwiftTerm.TerminalView, link: String, params: [String: String]) {}
+
+        func bell(source: SwiftTerm.TerminalView) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+
+        func clipboardCopy(source: SwiftTerm.TerminalView, content: Data) {
+            UIPasteboard.general.string = String(data: content, encoding: .utf8)
+        }
+
+        func scrolled(source: SwiftTerm.TerminalView, position: Double) {}
+        func rangeChanged(source: SwiftTerm.TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+// MARK: - Terminal Controller
+
+class TerminalController: ObservableObject, ShellCallback, @unchecked Sendable {
+    @Published var isActive = false
+    @Published var errorMessage: String?
+
+    private(set) var shellSession: ShellSession?
+    private weak var terminalView: SwiftTerm.TerminalView?
+
+    func attachTerminalView(_ tv: SwiftTerm.TerminalView) {
+        terminalView = tv
+    }
+
+    func start(session: Session) throws {
+        shellSession = try session.startShell(callback: self)
+        DispatchQueue.main.async { [weak self] in
+            self?.isActive = true
+            self?.errorMessage = nil
+        }
+    }
+
+    func stop() {
+        shellSession?.close()
+        shellSession = nil
+        terminalView = nil
+        isActive = false
+    }
+
+    // MARK: - ShellCallback
+
+    // Raw terminal output — feed bytes directly so ANSI escape codes are handled by SwiftTerm.
+    func onOutput(data: String) {
+        let bytes = ArraySlice(data.utf8)
+        DispatchQueue.main.async { [weak self] in
+            self?.terminalView?.feed(byteArray: bytes)
+        }
+    }
+
+    func onError(message: String) {
+        let text = "\r\n\u{1B}[31mError: \(message)\u{1B}[0m\r\n"
+        DispatchQueue.main.async { [weak self] in
+            self?.terminalView?.feed(text: text)
+            self?.errorMessage = message
+        }
+    }
+
+    func onClose() {
+        DispatchQueue.main.async { [weak self] in
+            self?.terminalView?.feed(text: "\r\n[Shell closed]\r\n")
+            self?.isActive = false
+            self?.shellSession = nil
         }
     }
 }
-*/

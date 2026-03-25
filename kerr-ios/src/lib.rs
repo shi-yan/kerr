@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use anyhow::Result;
+use base64::Engine as _;
 
 // Include the kerr core types
 // We'll need to reference the parent crate
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-mod types;
+pub(crate) mod types;
 mod endpoint;
 mod session;
 mod file_browser;
@@ -49,12 +50,17 @@ pub fn decode_connection_string(conn_str: String) -> Result<String, KerrError> {
 
 // Helper to decode connection string (from parent crate logic)
 fn decode_addr(conn_str: &str) -> Result<iroh::EndpointAddr, KerrError> {
-    // Decode base64
-    let compressed = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        conn_str.trim(),
-    )
-    .map_err(|e| KerrError::InvalidConnectionString)?;
+    let trimmed = conn_str.trim();
+    eprintln!("[kerr] decode_addr: input length={}", trimmed.len());
+
+    // Decode base64 (URL-safe, no padding)
+    let compressed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .map_err(|e| {
+            eprintln!("[kerr] decode_addr: base64 failed: {e}");
+            KerrError::InvalidConnectionString(format!("base64 decode failed: {e}"))
+        })?;
+    eprintln!("[kerr] decode_addr: base64 ok, compressed len={}", compressed.len());
 
     // Decompress gzip
     use std::io::Read;
@@ -62,11 +68,19 @@ fn decode_addr(conn_str: &str) -> Result<iroh::EndpointAddr, KerrError> {
     let mut json_str = String::new();
     decoder
         .read_to_string(&mut json_str)
-        .map_err(|_| KerrError::InvalidConnectionString)?;
+        .map_err(|e| {
+            eprintln!("[kerr] decode_addr: gzip failed: {e}");
+            KerrError::InvalidConnectionString(format!("gzip decompress failed: {e}"))
+        })?;
+    eprintln!("[kerr] decode_addr: gzip ok, json={json_str}");
 
-    // Deserialize
+    // Deserialize JSON into EndpointAddr
     let addr: iroh::EndpointAddr = serde_json::from_str(&json_str)
-        .map_err(|_| KerrError::InvalidConnectionString)?;
+        .map_err(|e| {
+            eprintln!("[kerr] decode_addr: json parse failed: {e}");
+            KerrError::InvalidConnectionString(format!("json parse failed: {e} (json was: {json_str})"))
+        })?;
+    eprintln!("[kerr] decode_addr: success");
 
     Ok(addr)
 }
@@ -85,7 +99,7 @@ fn encode_addr(addr: &iroh::EndpointAddr) -> Result<String, KerrError> {
         .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     let compressed = encoder.finish().map_err(|e| KerrError::NetworkError(e.to_string()))?;
 
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &compressed);
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&compressed);
     Ok(encoded)
 }
 
@@ -122,14 +136,25 @@ pub enum MessagePayload {
 #[rkyv(derive(Debug))]
 pub enum ClientMessage {
     Hello { session_type: SessionType },
-    Input { data: Vec<u8> },
+    KeyEvent { data: Vec<u8> },
     Resize { cols: u16, rows: u16 },
-    ListDir { path: String },
-    ReadFile { path: String },
-    WriteFile { path: String, data: Vec<u8> },
-    DeleteFile { path: String },
-    GetMetadata { path: String },
-    FileExists { path: String },
+    Disconnect,
+    StartUpload { path: String, size: u64, is_dir: bool, force: bool },
+    FileChunk { data: Vec<u8> },
+    EndUpload,
+    FileStart { relative_path: String, size: u64 },
+    ConfirmResponse { confirmed: bool },
+    RequestDownload { path: String, offset: u64 },
+    FsReadDir { path: String },
+    FsMetadata { path: String },
+    FsReadFile { path: String },
+    FsHashFile { path: String },
+    FsDelete { path: String },
+    TcpOpen { stream_id: u32, destination_host: Option<String>, destination_port: u16 },
+    TcpData { stream_id: u32, data: Vec<u8> },
+    TcpClose { stream_id: u32 },
+    PingRequest { data: Vec<u8> },
+    DnsQuery { query_id: u32, query_data: Vec<u8> },
 }
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -137,30 +162,24 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Output { data: Vec<u8> },
     Error { message: String },
-    DirListing { entries: Vec<RemoteFileEntry> },
-    FileContent { data: Vec<u8> },
-    Metadata { metadata: RemoteFileMetadata },
-    Success,
-    Exists { exists: bool },
-}
-
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
-#[rkyv(derive(Debug))]
-pub struct RemoteFileEntry {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
-    pub is_hidden: bool,
-    pub metadata: Option<RemoteFileMetadata>,
-}
-
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
-#[rkyv(derive(Debug))]
-pub struct RemoteFileMetadata {
-    pub size: u64,
-    pub created: Option<u64>,   // Unix timestamp in seconds
-    pub modified: Option<u64>,  // Unix timestamp in seconds
-    pub is_dir: bool,
+    UploadAck,
+    ConfirmPrompt { message: String },
+    StartDownload { size: u64, is_dir: bool },
+    FileChunk { data: Vec<u8> },
+    EndDownload,
+    FileStart { relative_path: String, size: u64 },
+    Progress { bytes_transferred: u64, total_bytes: u64 },
+    FsDirListing { entries_json: String },
+    FsMetadataResponse { metadata_json: String },
+    FsFileContent { data: Vec<u8> },
+    FsHashResponse { hash: String },
+    FsDeleteResponse { success: bool },
+    FsError { message: String },
+    TcpOpenResponse { stream_id: u32, success: bool, error: Option<String> },
+    TcpDataResponse { stream_id: u32, data: Vec<u8> },
+    TcpCloseResponse { stream_id: u32, error: Option<String> },
+    PingResponse { data: Vec<u8> },
+    DnsResponse { query_id: u32, response_data: Vec<u8> },
 }
 
 // Helper to send envelope
@@ -171,7 +190,7 @@ async fn send_envelope(
     let data = rkyv::to_bytes::<rkyv::rancor::Error>(envelope)
         .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     let len = data.len() as u32;
-    send.write_all(&len.to_le_bytes())
+    send.write_all(&len.to_be_bytes())
         .await
         .map_err(|e| KerrError::NetworkError(e.to_string()))?;
     send.write_all(&data)
@@ -190,7 +209,7 @@ async fn recv_envelope(
     recv.read_exact(&mut len_bytes)
         .await
         .map_err(|e| KerrError::NetworkError(e.to_string()))?;
-    let len = u32::from_le_bytes(len_bytes) as usize;
+    let len = u32::from_be_bytes(len_bytes) as usize;
 
     let mut data = vec![0u8; len];
     recv.read_exact(&mut data)

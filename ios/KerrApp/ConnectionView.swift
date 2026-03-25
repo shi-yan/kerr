@@ -1,118 +1,237 @@
 import SwiftUI
 
+// MARK: - Saved connection model
+
+struct SavedConnection: Codable, Identifiable {
+    var id: UUID = UUID()
+    var alias: String
+    var hostName: String
+    var connectionString: String
+    var registeredAt: Date
+
+    static let storageKey = "kerr_saved_connections"
+
+    static func load() -> [SavedConnection] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let list = try? JSONDecoder().decode([SavedConnection].self, from: data)
+        else { return [] }
+        return list
+    }
+
+    static func save(_ list: [SavedConnection]) {
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
+    }
+}
+
+// MARK: - Connection list view
+
 struct ConnectionView: View {
     @ObservedObject var connectionManager: ConnectionManager
-    @State private var connectionString = ""
-    @State private var showScanner = false
+    @State private var connections: [SavedConnection] = SavedConnection.load()
+    @State private var connectingId: UUID? = nil
+    @State private var showAddSheet = false
+    @State private var errorMessage: String? = nil
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "network")
-                .font(.system(size: 80))
-                .foregroundColor(.blue)
-                .padding(.bottom, 20)
+        VStack(spacing: 0) {
+            headerView
 
-            Text("Connect to Kerr Server")
-                .font(.title)
-                .fontWeight(.bold)
-
-            Text(connectionManager.connectionStatus)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-
-            if let error = connectionManager.errorMessage {
-                Text(error)
+            if let err = errorMessage {
+                Text(err)
                     .font(.caption)
                     .foregroundColor(.red)
                     .padding()
-                    .background(Color.red.opacity(0.1))
-                    .cornerRadius(8)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Connection String")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                TextField("Paste connection string here", text: $connectionString)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-            }
-            .padding(.horizontal)
-
-            HStack(spacing: 15) {
-                Button(action: {
-                    showScanner = true
-                }) {
-                    Label("Scan QR", systemImage: "qrcode.viewfinder")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button(action: {
-                    // Try to paste from clipboard
-                    if let string = UIPasteboard.general.string {
-                        connectionString = string
-                    }
-                }) {
-                    Label("Paste", systemImage: "doc.on.clipboard")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(.horizontal)
-
-            Button(action: {
-                connectionManager.connect(connectionString: connectionString)
-            }) {
-                Text("Connect")
-                    .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(connectionString.isEmpty ? Color.gray : Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+                    .background(Color.red.opacity(0.1))
             }
-            .disabled(connectionString.isEmpty)
-            .padding(.horizontal)
 
+            if connections.isEmpty {
+                emptyStateView
+            } else {
+                listView
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Kerr")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: { showAddSheet = true }) {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showAddSheet) {
+            AddConnectionSheet { saved in
+                connections.append(saved)
+                SavedConnection.save(connections)
+            }
+        }
+    }
+
+    private var headerView: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "network")
+                .font(.system(size: 48))
+                .foregroundColor(.accentColor)
+            Text("Select a Connection")
+                .font(.title2).fontWeight(.semibold)
+            Text("Choose a saved connection to connect to")
+                .font(.subheadline).foregroundColor(.secondary)
+        }
+        .padding(.vertical, 28)
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 56))
+                .foregroundColor(.secondary)
+            Text("No saved connections")
+                .font(.headline)
+            Text("Tap + to add a connection using a connection string or QR code.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button(action: { showAddSheet = true }) {
+                Label("Add Connection", systemImage: "plus.circle.fill")
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
             Spacer()
         }
-        .padding()
-        .navigationTitle("Kerr")
-        .sheet(isPresented: $showScanner) {
-            QRScannerView { scannedString in
-                connectionString = scannedString
-                showScanner = false
+    }
+
+    private var listView: some View {
+        List {
+            ForEach(connections) { conn in
+                connectionRow(conn)
+            }
+            .onDelete { indexSet in
+                connections.remove(atOffsets: indexSet)
+                SavedConnection.save(connections)
+            }
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    private func connectionRow(_ conn: SavedConnection) -> some View {
+        Button(action: { connect(conn) }) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(conn.alias.isEmpty ? "Unnamed" : conn.alias)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    Text(conn.hostName.isEmpty ? "Unknown host" : conn.hostName)
+                        .font(.subheadline)
+                        .foregroundColor(.accentColor)
+                    Text("Registered: \(conn.registeredAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if connectingId == conn.id {
+                    ProgressView()
+                } else {
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(connectingId != nil)
+    }
+
+    private func connect(_ conn: SavedConnection) {
+        errorMessage = nil
+        let cs = conn.connectionString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cs.isEmpty {
+            errorMessage = "Connection string is empty."
+            return
+        }
+        // Basic sanity: try to validate before going async
+        do {
+            _ = try decodeConnectionString(connStr: cs)
+        } catch let e as KerrError {
+            errorMessage = e.localizedDescription
+            return
+        } catch {
+            errorMessage = "Invalid connection string: \(error)"
+            return
+        }
+        connectingId = conn.id
+        connectionManager.connect(connectionString: cs) { err in
+            connectingId = nil
+            if let err = err {
+                errorMessage = err
             }
         }
     }
 }
 
-struct QRScannerView: View {
-    let onScanned: (String) -> Void
+// MARK: - Add connection sheet
+
+struct AddConnectionSheet: View {
+    let onSave: (SavedConnection) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var alias = ""
+    @State private var hostName = ""
+    @State private var connectionString = ""
 
     var body: some View {
-        VStack {
-            Text("QR Scanner")
-                .font(.headline)
-                .padding()
-
-            // TODO: Implement QR code scanner using AVFoundation
-            Text("QR Scanner coming soon...")
-                .foregroundColor(.secondary)
-
-            Button("Cancel") {
-                // This will be dismissed by the parent
+        NavigationStack {
+            Form {
+                Section("Details") {
+                    TextField("Alias (e.g. my-mac)", text: $alias)
+                    TextField("Host name (optional)", text: $hostName)
+                }
+                Section("Connection String") {
+                    TextEditor(text: $connectionString)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(minHeight: 80)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                    Button(action: paste) {
+                        Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
+                    }
+                }
             }
-            .padding()
+            .navigationTitle("Add Connection")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save() }
+                        .disabled(connectionString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
         }
     }
-}
 
-struct ConnectionView_Previews: PreviewProvider {
-    static var previews: some View {
-        ConnectionView(connectionManager: ConnectionManager())
+    private func paste() {
+        if let s = UIPasteboard.general.string {
+            connectionString = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func save() {
+        let conn = SavedConnection(
+            alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+            hostName: hostName.trimmingCharacters(in: .whitespacesAndNewlines),
+            connectionString: connectionString.trimmingCharacters(in: .whitespacesAndNewlines),
+            registeredAt: Date()
+        )
+        onSave(conn)
+        dismiss()
     }
 }

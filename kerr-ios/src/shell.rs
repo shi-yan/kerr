@@ -107,7 +107,7 @@ impl ShellSession {
         runtime.block_on(async {
             let envelope = MessageEnvelope {
                 session_id: self.session_id.clone(),
-                payload: MessagePayload::Client(ClientMessage::Input {
+                payload: MessagePayload::Client(ClientMessage::KeyEvent {
                     data: data.into_bytes(),
                 }),
             };

@@ -4,10 +4,10 @@ struct ContentView: View {
     @StateObject private var connectionManager = ConnectionManager()
 
     var body: some View {
-        NavigationView {
-            if connectionManager.isConnected {
-                MainTabView(connectionManager: connectionManager)
-            } else {
+        if connectionManager.isConnected {
+            MainTabView(connectionManager: connectionManager)
+        } else {
+            NavigationStack {
                 ConnectionView(connectionManager: connectionManager)
             }
         }
@@ -19,15 +19,19 @@ struct MainTabView: View {
 
     var body: some View {
         TabView {
-            FileBrowserView(connectionManager: connectionManager)
-                .tabItem {
-                    Label("Files", systemImage: "folder")
-                }
+            NavigationStack {
+                FileBrowserView(connectionManager: connectionManager)
+            }
+            .tabItem {
+                Label("Files", systemImage: "folder")
+            }
 
-            TerminalView(connectionManager: connectionManager)
-                .tabItem {
-                    Label("Terminal", systemImage: "terminal")
-                }
+            NavigationStack {
+                TerminalView(connectionManager: connectionManager)
+            }
+            .tabItem {
+                Label("Terminal", systemImage: "terminal")
+            }
         }
     }
 }
