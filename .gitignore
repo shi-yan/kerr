@@ -8,10 +8,14 @@ frontend/.vite
 
 # iOS
 ios/Frameworks/*.a
+ios/Frameworks/*.xcframework
 ios/Generated/
 *.xcworkspace
 *.xcuserdata
 *.xcuserdatad
+
+# Iroh node address (contains node ID and IP addresses)
+node_addr.json
 .DS_Store
 *.swp
 *~

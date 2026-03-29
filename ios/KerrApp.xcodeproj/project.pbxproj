@@ -1,0 +1,405 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		01BCAAACA35B372518C5960A /* ConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3928D52FA2C07ECA63B6C2C2 /* ConnectionManager.swift */; };
+		0D21BE15EDF1C4C260EC91E8 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11EE9A3CE4AC20D2F4EADF16 /* TerminalView.swift */; };
+		3D533F14D05034ADCB62BF58 /* KerrApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CAFE363E016F9C9FCED3481 /* KerrApp.swift */; };
+		51156D3DAC3729E7BC81AD35 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06E0E4204F4CEF549D884F2D /* ConnectionView.swift */; };
+		7B6748EDB3281BFDD7541565 /* kerr_ios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617DEB270796ACA282867467 /* kerr_ios.swift */; };
+		9D1630260FE1621DC1F3EE22 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 0FC279B4226495CA4B670D1F /* SwiftTerm */; };
+		A43498878534F17F35F134F0 /* kerr_ios.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = F134711959BF992581A2AA43 /* kerr_ios.xcframework */; };
+		AB61242F1B0F93F5DE120290 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C887A5653E1731FEFC4679 /* ContentView.swift */; };
+		ABC3A78E015E29E4A00E726E /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C79948E006674F6E4AC30F1 /* FileBrowserView.swift */; };
+		BA33EC4A048694675CA4BA9E /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBAFB32523E04459E44E3B56 /* QRScannerView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		06E0E4204F4CEF549D884F2D /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
+		11EE9A3CE4AC20D2F4EADF16 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
+		1688D808437D7CCDE2806867 /* KerrApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KerrApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3928D52FA2C07ECA63B6C2C2 /* ConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManager.swift; sourceTree = "<group>"; };
+		5C79948E006674F6E4AC30F1 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserView.swift; sourceTree = "<group>"; };
+		617DEB270796ACA282867467 /* kerr_ios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = kerr_ios.swift; sourceTree = "<group>"; };
+		6CAFE363E016F9C9FCED3481 /* KerrApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KerrApp.swift; sourceTree = "<group>"; };
+		CBAFB32523E04459E44E3B56 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		D1C887A5653E1731FEFC4679 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		F134711959BF992581A2AA43 /* kerr_ios.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = kerr_ios.xcframework; path = Frameworks/kerr_ios.xcframework; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4E7A1513C4ED9E02EAB32E29 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9D1630260FE1621DC1F3EE22 /* SwiftTerm in Frameworks */,
+				A43498878534F17F35F134F0 /* kerr_ios.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		333296F6B7450FF2B7CF785C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1688D808437D7CCDE2806867 /* KerrApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		72C63E6E21F3513EFC600758 /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				617DEB270796ACA282867467 /* kerr_ios.swift */,
+			);
+			path = Generated;
+			sourceTree = "<group>";
+		};
+		930F1967C697C19F6E860C57 = {
+			isa = PBXGroup;
+			children = (
+				72C63E6E21F3513EFC600758 /* Generated */,
+				D31598521BB6F36DDA9881E0 /* KerrApp */,
+				D5A12EC957F8928DBC48633F /* Frameworks */,
+				333296F6B7450FF2B7CF785C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D31598521BB6F36DDA9881E0 /* KerrApp */ = {
+			isa = PBXGroup;
+			children = (
+				3928D52FA2C07ECA63B6C2C2 /* ConnectionManager.swift */,
+				06E0E4204F4CEF549D884F2D /* ConnectionView.swift */,
+				D1C887A5653E1731FEFC4679 /* ContentView.swift */,
+				5C79948E006674F6E4AC30F1 /* FileBrowserView.swift */,
+				6CAFE363E016F9C9FCED3481 /* KerrApp.swift */,
+				CBAFB32523E04459E44E3B56 /* QRScannerView.swift */,
+				11EE9A3CE4AC20D2F4EADF16 /* TerminalView.swift */,
+			);
+			path = KerrApp;
+			sourceTree = "<group>";
+		};
+		D5A12EC957F8928DBC48633F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F134711959BF992581A2AA43 /* kerr_ios.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AFA0A8360C35DA6FC3C170B5 /* KerrApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9C57ACEB0D93B1D60425C334 /* Build configuration list for PBXNativeTarget "KerrApp" */;
+			buildPhases = (
+				05FD0C112B16AA7DDB5651C5 /* Sources */,
+				4E7A1513C4ED9E02EAB32E29 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = KerrApp;
+			packageProductDependencies = (
+				0FC279B4226495CA4B670D1F /* SwiftTerm */,
+			);
+			productName = KerrApp;
+			productReference = 1688D808437D7CCDE2806867 /* KerrApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D93556D7C663665F9A87C791 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = 9341C731E2125411151FC4CF /* Build configuration list for PBXProject "KerrApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 930F1967C697C19F6E860C57;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BD4E5676898ED5FFB76DB28F /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 333296F6B7450FF2B7CF785C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AFA0A8360C35DA6FC3C170B5 /* KerrApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		05FD0C112B16AA7DDB5651C5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01BCAAACA35B372518C5960A /* ConnectionManager.swift in Sources */,
+				51156D3DAC3729E7BC81AD35 /* ConnectionView.swift in Sources */,
+				AB61242F1B0F93F5DE120290 /* ContentView.swift in Sources */,
+				ABC3A78E015E29E4A00E726E /* FileBrowserView.swift in Sources */,
+				3D533F14D05034ADCB62BF58 /* KerrApp.swift in Sources */,
+				BA33EC4A048694675CA4BA9E /* QRScannerView.swift in Sources */,
+				0D21BE15EDF1C4C260EC91E8 /* TerminalView.swift in Sources */,
+				7B6748EDB3281BFDD7541565 /* kerr_ios.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		4CA153AE4C675866115BA1CD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 8HT9SU67L8;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Generated";
+				INFOPLIST_FILE = KerrApp/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kerr.app;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/Generated/kerr_iosFFI.h";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		66F6145469B4AC1AB4E39872 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		694F93187A60AF0CA63531D0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		F0A2631BBC155A0AC3B61021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 8HT9SU67L8;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Generated";
+				INFOPLIST_FILE = KerrApp/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kerr.app;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/Generated/kerr_iosFFI.h";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9341C731E2125411151FC4CF /* Build configuration list for PBXProject "KerrApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				66F6145469B4AC1AB4E39872 /* Debug */,
+				694F93187A60AF0CA63531D0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9C57ACEB0D93B1D60425C334 /* Build configuration list for PBXNativeTarget "KerrApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4CA153AE4C675866115BA1CD /* Debug */,
+				F0A2631BBC155A0AC3B61021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		BD4E5676898ED5FFB76DB28F /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0FC279B4226495CA4B670D1F /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BD4E5676898ED5FFB76DB28F /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = D93556D7C663665F9A87C791 /* Project object */;
+}

@@ -1,0 +1,70 @@
+name: KerrApp
+options:
+  bundleIdPrefix: com.kerr
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15"
+  createIntermediateGroups: true
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.0.0
+
+targets:
+  KerrApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+
+    sources:
+      - path: KerrApp
+        excludes:
+          - "Info.plist"
+      # Generated Swift bindings — run kerr-ios/build-ios.sh (or setup.sh) first.
+      # Only kerr_ios.swift is compiled; the header/modulemap just need to be on
+      # disk and are found via SWIFT_INCLUDE_PATHS / HEADER_SEARCH_PATHS below.
+      - path: Generated
+        includes:
+          - "kerr_ios.swift"
+
+    dependencies:
+      - package: SwiftTerm
+        product: SwiftTerm
+      # XCFramework contains both the device slice (aarch64-apple-ios) and the
+      # simulator slice (aarch64/x86_64-apple-ios-sim). Xcode picks the right one
+      # automatically, avoiding duplicate-symbol linker errors.
+      - framework: Frameworks/kerr_ios.xcframework
+        embed: false
+
+    info:
+      path: KerrApp/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSCameraUsageDescription: "Used to scan the QR code from the desktop app to establish a connection."
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kerr.app
+        SWIFT_VERSION: "5.9"
+        ENABLE_BITCODE: NO
+        OTHER_LDFLAGS:
+          - "-lc++"
+          - "-lresolv"
+          - "-framework Network"
+          - "-framework Security"
+          - "-framework SystemConfiguration"
+        # Bridging header exposes all C declarations from kerr_iosFFI.h directly
+        # to Swift. This is more reliable than the modulemap/SWIFT_INCLUDE_PATHS
+        # approach: canImport(kerr_iosFFI) will be false, but RustBuffer and all
+        # uniffi checksum functions are visible as plain global Swift names.
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Generated/kerr_iosFFI.h"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Generated"
+      configs:
+        Debug:
+          DEBUG_INFORMATION_FORMAT: dwarf
+        Release:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+          SWIFT_OPTIMIZATION_LEVEL: "-O"

@@ -25,6 +25,14 @@ struct SavedConnection: Codable, Identifiable {
     }
 }
 
+// MARK: - QR payload (matches Vue output: {"alias":"...","host_name":"...","cs":"..."})
+
+private struct QRConnectionPayload: Decodable {
+    let alias: String
+    let host_name: String
+    let cs: String
+}
+
 // MARK: - Connection list view
 
 struct ConnectionView: View {
@@ -32,11 +40,22 @@ struct ConnectionView: View {
     @State private var connections: [SavedConnection] = SavedConnection.load()
     @State private var connectingId: UUID? = nil
     @State private var showAddSheet = false
+    @State private var showScanner = false
     @State private var errorMessage: String? = nil
+    @State private var successMessage: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             headerView
+
+            if let msg = successMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundColor(.green)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.green.opacity(0.1))
+            }
 
             if let err = errorMessage {
                 Text(err)
@@ -59,8 +78,13 @@ struct ConnectionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { showAddSheet = true }) {
-                    Image(systemName: "plus")
+                HStack(spacing: 4) {
+                    Button(action: { showScanner = true }) {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                    Button(action: { showAddSheet = true }) {
+                        Image(systemName: "square.and.pencil")
+                    }
                 }
             }
         }
@@ -68,6 +92,11 @@ struct ConnectionView: View {
             AddConnectionSheet { saved in
                 connections.append(saved)
                 SavedConnection.save(connections)
+            }
+        }
+        .sheet(isPresented: $showScanner) {
+            QRScannerSheet { payload in
+                handleScannedQR(payload)
             }
         }
     }
@@ -93,17 +122,25 @@ struct ConnectionView: View {
                 .foregroundColor(.secondary)
             Text("No saved connections")
                 .font(.headline)
-            Text("Tap + to add a connection using a connection string or QR code.")
+            Text("Scan a QR code from the web UI, or tap the pencil icon to add manually.")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
-            Button(action: { showAddSheet = true }) {
-                Label("Add Connection", systemImage: "plus.circle.fill")
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
+            HStack(spacing: 12) {
+                Button(action: { showScanner = true }) {
+                    Label("Scan QR", systemImage: "qrcode.viewfinder")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                Button(action: { showAddSheet = true }) {
+                    Label("Add Manually", systemImage: "square.and.pencil")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
             Spacer()
         }
     }
@@ -151,12 +188,12 @@ struct ConnectionView: View {
 
     private func connect(_ conn: SavedConnection) {
         errorMessage = nil
+        successMessage = nil
         let cs = conn.connectionString.trimmingCharacters(in: .whitespacesAndNewlines)
         if cs.isEmpty {
             errorMessage = "Connection string is empty."
             return
         }
-        // Basic sanity: try to validate before going async
         do {
             _ = try decodeConnectionString(connStr: cs)
         } catch let e as KerrError {
@@ -174,9 +211,38 @@ struct ConnectionView: View {
             }
         }
     }
+
+    private func handleScannedQR(_ payload: String) {
+        errorMessage = nil
+        successMessage = nil
+        guard let data = payload.data(using: .utf8),
+              let qr = try? JSONDecoder().decode(QRConnectionPayload.self, from: data)
+        else {
+            errorMessage = "Invalid QR code — expected Kerr connection format."
+            return
+        }
+        let cs = qr.cs.trimmingCharacters(in: .whitespacesAndNewlines)
+        if connections.contains(where: { $0.connectionString == cs }) {
+            errorMessage = "\"\(qr.alias)\" is already saved."
+            return
+        }
+        let conn = SavedConnection(
+            alias: qr.alias,
+            hostName: qr.host_name,
+            connectionString: cs,
+            registeredAt: Date()
+        )
+        connections.append(conn)
+        SavedConnection.save(connections)
+        successMessage = "Added \"\(qr.alias.isEmpty ? "connection" : qr.alias)\" from QR code."
+        // Auto-clear success message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            successMessage = nil
+        }
+    }
 }
 
-// MARK: - Add connection sheet
+// MARK: - Add connection sheet (manual entry)
 
 struct AddConnectionSheet: View {
     let onSave: (SavedConnection) -> Void
