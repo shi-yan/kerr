@@ -66,6 +66,8 @@ pub struct Connection {
 pub struct ConnectionsListResponse {
     pub connections: Vec<Connection>,
     pub count: usize,
+    #[serde(default)]
+    pub from_cache: bool,
 }
 
 /// Generate a random state token for CSRF protection
@@ -138,6 +140,32 @@ fn get_config_dir() -> Result<PathBuf> {
     }
 
     Ok(config_dir.to_path_buf())
+}
+
+/// Get the connections cache file path
+fn get_cache_file_path() -> Result<PathBuf> {
+    let config_dir = get_config_dir()?;
+    Ok(config_dir.join("connections_cache.json"))
+}
+
+/// Save connections to the local filesystem cache
+fn save_connections_cache(connections: &[Connection]) -> Result<()> {
+    let cache_file = get_cache_file_path()?;
+    let json_data = serde_json::to_string_pretty(connections)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to serialize connections cache: {}", e)))?;
+    fs::write(&cache_file, json_data)
+        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to write connections cache: {}", e)))?;
+    Ok(())
+}
+
+/// Load connections from the local filesystem cache, returns None if not available
+fn load_connections_cache() -> Option<Vec<Connection>> {
+    let cache_file = get_cache_file_path().ok()?;
+    if !cache_file.exists() {
+        return None;
+    }
+    let json_data = fs::read_to_string(&cache_file).ok()?;
+    serde_json::from_str(&json_data).ok()
 }
 
 /// Get the session file path, using custom path if provided
@@ -360,6 +388,19 @@ pub async fn register_connection(
     let registration: RegisterConnectionResponse = serde_json::from_str(&response_text)
         .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to parse registration response: {}", e)))?;
 
+    // Update local cache: add the newly registered connection
+    let new_connection = Connection {
+        connection_string: registration.connection_string.clone(),
+        registered_at: registration.registered_at,
+        alias: registration.alias.clone(),
+        host_name: registration.host_name.clone(),
+    };
+    let mut cached = load_connections_cache().unwrap_or_default();
+    // Replace existing entry with same alias/connection_string if present
+    cached.retain(|c| c.connection_string != new_connection.connection_string);
+    cached.push(new_connection);
+    let _ = save_connections_cache(&cached);
+
     Ok(registration)
 }
 
@@ -369,7 +410,7 @@ pub async fn unregister_connection(alias: String) -> Result<()> {
     let client = reqwest::Client::new();
 
     let request_payload = DeleteConnectionRequest {
-        alias,
+        alias: alias.clone(),
     };
 
     let response = client
@@ -390,37 +431,71 @@ pub async fn unregister_connection(alias: String) -> Result<()> {
         )));
     }
 
+    // Update local cache: remove the deleted connection
+    if let Some(mut cached) = load_connections_cache() {
+        cached.retain(|c| c.alias.as_deref() != Some(&alias));
+        let _ = save_connections_cache(&cached);
+    }
+
     Ok(())
 }
 
-/// Fetch all connections for the authenticated user from the backend server
+/// Fetch all connections for the authenticated user.
+/// Tries AWS Lambda first; on any network/HTTP failure falls back to the local filesystem cache.
+/// On success, updates the local cache.
 pub async fn fetch_connections() -> Result<ConnectionsListResponse> {
-    let session_id = get_session_id()?;
-    let client = reqwest::Client::new();
+    let session_result = get_session_id();
 
-    let response = client
-        .get(format!("{}/connections", BASE_URL))
-        .header("kerr_session", session_id)
-        .send()
-        .await
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to fetch connections: {}", e)))?;
+    // If there's no session we can still serve the cache (offline mode)
+    let live_result: Option<Result<ConnectionsListResponse>> = if let Ok(session_id) = session_result {
+        let client = reqwest::Client::new();
+        let request = client
+            .get(format!("{}/connections", BASE_URL))
+            .header("kerr_session", session_id)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(n0_snafu::Error::anyhow(anyhow::anyhow!(
-            "Backend returned error {}: {}",
-            status,
-            error_text
-        )));
+        match request {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<ConnectionsListResponse>().await {
+                    Ok(mut resp) => {
+                        resp.from_cache = false;
+                        // Update local cache with fresh data
+                        let _ = save_connections_cache(&resp.connections);
+                        Some(Ok(resp))
+                    }
+                    Err(e) => Some(Err(n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to parse connections response: {}", e)))),
+                }
+            }
+            Ok(response) => {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                eprintln!("Warning: AWS registry returned {}: {}", status, error_text);
+                None // fall through to cache
+            }
+            Err(e) => {
+                eprintln!("Warning: Cannot reach AWS registry: {}", e);
+                None // fall through to cache
+            }
+        }
+    } else {
+        None // no session, fall through to cache
+    };
+
+    if let Some(result) = live_result {
+        return result;
     }
 
-    let connections: ConnectionsListResponse = response
-        .json()
-        .await
-        .map_err(|e| n0_snafu::Error::anyhow(anyhow::anyhow!("Failed to parse connections response: {}", e)))?;
+    // Fall back to local filesystem cache
+    if let Some(cached) = load_connections_cache() {
+        let count = cached.len();
+        return Ok(ConnectionsListResponse { connections: cached, count, from_cache: true });
+    }
 
-    Ok(connections)
+    Err(n0_snafu::Error::anyhow(anyhow::anyhow!(
+        "AWS registry is unreachable and no local cache is available. Connect to the internet at least once to populate the cache."
+    )))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -130,16 +130,18 @@ impl ShellSession {
         })
     }
 
+    // Async version — use this when already inside a Tokio async context
+    // (e.g. from session.rs) to avoid nested block_on panics.
+    pub async fn close_async(&self) {
+        if let Some(task) = self.receiver_task.lock().await.take() {
+            task.abort();
+        }
+        self.callback.on_close();
+    }
+
+    // Sync version for Swift FFI calls from outside the runtime.
     pub fn close(&self) {
         let runtime = crate::get_runtime();
-        runtime.block_on(async {
-            // Abort the receiver task
-            if let Some(task) = self.receiver_task.lock().await.take() {
-                task.abort();
-            }
-
-            // Notify callback
-            self.callback.on_close();
-        });
+        runtime.block_on(self.close_async());
     }
 }

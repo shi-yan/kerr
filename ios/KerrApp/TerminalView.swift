@@ -11,21 +11,19 @@ struct TerminalView: View {
         if controller.isActive {
             ZStack(alignment: .topTrailing) {
                 SwiftTermRepresentable(controller: controller)
-                    .ignoresSafeArea()
 
                 Button(action: { controller.stop() }) {
-                    Text("Disconnect")
+                    Text("Stop")
                         .font(.caption.weight(.semibold))
-                        .foregroundColor(.red)
+                        .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(.black.opacity(0.7))
                         .clipShape(Capsule())
                 }
-                .padding(.top, 56)
+                .padding(.top, 8)
                 .padding(.trailing, 12)
             }
-            .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
         } else {
             idleView
@@ -159,15 +157,26 @@ class TerminalController: ObservableObject, ShellCallback, @unchecked Sendable {
     }
 
     func start(session: Session) throws {
-        shellSession = try session.startShell(callback: self)
+        let shell = try session.startShell(callback: self)
+        shellSession = shell
+        // Re-assign shellSession inside the dispatch too: startShell() closes
+        // the previous shell internally, which calls onClose() → dispatches
+        // shellSession = nil to the main queue. That dispatch fires after this
+        // function returns, wiping out the new session. Re-assigning here
+        // (inside a later dispatch) ensures we always win.
         DispatchQueue.main.async { [weak self] in
+            self?.shellSession = shell
             self?.isActive = true
             self?.errorMessage = nil
         }
     }
 
     func stop() {
-        shellSession?.close()
+        // Clear Swift state immediately on the main thread.
+        // Do NOT call shellSession?.close() here — that calls Rust block_on
+        // from the main thread, which panics if another block_on is already
+        // active or follows immediately. The session.disconnect() call in
+        // ConnectionManager handles Rust cleanup on a background thread.
         shellSession = nil
         terminalView = nil
         isActive = false
@@ -195,7 +204,10 @@ class TerminalController: ObservableObject, ShellCallback, @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             self?.terminalView?.feed(text: "\r\n[Shell closed]\r\n")
             self?.isActive = false
-            self?.shellSession = nil
+            // Do NOT nil shellSession here. startShell() closes the previous
+            // shell internally and this dispatch fires after the new session
+            // is already assigned — clearing it would break reconnection.
+            // stop() handles the explicit nil when the user exits.
         }
     }
 }

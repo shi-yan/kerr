@@ -44,9 +44,9 @@ impl Session {
         runtime.block_on(async {
             let mut shell_lock = self.shell_session.lock().await;
 
-            // Close existing shell if any
+            // Close existing shell if any (use async version — we're already inside block_on)
             if let Some(existing) = shell_lock.take() {
-                existing.close();
+                existing.close_async().await;
             }
 
             // Create new shell session
@@ -62,9 +62,9 @@ impl Session {
             let mut connected = self.connected.lock().await;
             *connected = false;
 
-            // Close shell if active
+            // Close shell if active (use async version — we're already inside block_on)
             if let Some(shell) = self.shell_session.lock().await.take() {
-                shell.close();
+                shell.close_async().await;
             }
 
             // Close connection

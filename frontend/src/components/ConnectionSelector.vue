@@ -16,13 +16,17 @@
         <button @click="loadConnections" class="retry-button">Retry</button>
       </div>
 
-      <div v-else-if="connections.length === 0" class="empty-state">
+      <div v-if="fromCache" class="cache-banner">
+        Offline mode — showing cached connections (AWS registry unreachable)
+      </div>
+
+      <div v-if="!loading && !error && connections.length === 0" class="empty-state">
         <div class="empty-icon">📡</div>
         <p>No registered connections found</p>
         <p class="empty-hint">Register a connection using: <code>kerr serve --register &lt;alias&gt;</code></p>
       </div>
 
-      <div v-else class="connections-list">
+      <div v-if="!loading && !error && connections.length > 0" class="connections-list">
         <div
           v-for="connection in connections"
           :key="connection.connection_string"
@@ -90,6 +94,7 @@ const connections = ref<Connection[]>([]);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const connectingTo = ref<string | null>(null);
+const fromCache = ref(false);
 
 const qrConnection = ref<Connection | null>(null);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
@@ -105,6 +110,7 @@ const loadConnections = async () => {
     }
     const data = await response.json();
     connections.value = data.connections;
+    fromCache.value = data.from_cache ?? false;
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load connections';
   } finally {
@@ -261,6 +267,17 @@ onMounted(() => {
 
 .retry-button:hover {
   background: #6dd4ff;
+}
+
+.cache-banner {
+  background: #3d2e00;
+  border: 1px solid #7a5c00;
+  color: #e0b84a;
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 16px;
+  text-align: center;
 }
 
 .empty-state {

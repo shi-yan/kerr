@@ -58,7 +58,10 @@ class ConnectionManager: ObservableObject {
     }
 
     func disconnect() {
-        session?.disconnect()
+        // Just nil out the Swift references. The underlying Rust objects
+        // (iroh::endpoint::Connection etc.) close themselves when dropped —
+        // no need to call session.disconnect(), which panics because
+        // block_on can't be called from a Tokio worker thread.
         session = nil
         fileBrowser = nil
         endpoint = nil

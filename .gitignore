@@ -13,7 +13,7 @@ ios/Generated/
 *.xcworkspace
 *.xcuserdata
 *.xcuserdatad
-
+ios/build-device
 # Iroh node address (contains node ID and IP addresses)
 node_addr.json
 .DS_Store
