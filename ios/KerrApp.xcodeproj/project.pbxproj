@@ -17,6 +17,12 @@
 		AB61242F1B0F93F5DE120290 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C887A5653E1731FEFC4679 /* ContentView.swift */; };
 		ABC3A78E015E29E4A00E726E /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C79948E006674F6E4AC30F1 /* FileBrowserView.swift */; };
 		BA33EC4A048694675CA4BA9E /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBAFB32523E04459E44E3B56 /* QRScannerView.swift */; };
+		/* ── VPN additions ── */
+		FF010001A2B3C4D5E6F7A8B9 /* VpnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF010002A2B3C4D5E6F7A8B9 /* VpnView.swift */; };
+		FF010003A2B3C4D5E6F7A8B9 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF010004A2B3C4D5E6F7A8B9 /* PacketTunnelProvider.swift */; };
+		FF010005A2B3C4D5E6F7A8B9 /* kerr_ios.swift in Sources (ext) */ = {isa = PBXBuildFile; fileRef = 617DEB270796ACA282867467 /* kerr_ios.swift */; };
+		FF010006A2B3C4D5E6F7A8B9 /* kerr_ios.xcframework in Frameworks (ext) */ = {isa = PBXBuildFile; fileRef = F134711959BF992581A2AA43 /* kerr_ios.xcframework */; };
+		FF010007A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex in CopyFiles */ = {isa = PBXBuildFile; fileRef = FF010008A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,7 +36,28 @@
 		CBAFB32523E04459E44E3B56 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		D1C887A5653E1731FEFC4679 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		F134711959BF992581A2AA43 /* kerr_ios.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = kerr_ios.xcframework; path = Frameworks/kerr_ios.xcframework; sourceTree = "<group>"; };
+		/* ── VPN additions ── */
+		FF010002A2B3C4D5E6F7A8B9 /* VpnView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VpnView.swift; sourceTree = "<group>"; };
+		FF010004A2B3C4D5E6F7A8B9 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		FF010009A2B3C4D5E6F7A8B9 /* NetworkExtension-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "Info.plist"; path = "NetworkExtension/Info.plist"; sourceTree = "<group>"; };
+		FF01000AA2B3C4D5E6F7A8B9 /* KerrApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KerrApp.entitlements; sourceTree = "<group>"; };
+		FF01000BA2B3C4D5E6F7A8B9 /* NetworkExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NetworkExtension.entitlements; sourceTree = "<group>"; };
+		FF010008A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KerrNetworkExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		FF020001A2B3C4D5E6F7A8B9 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				FF010007A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex in CopyFiles */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		4E7A1513C4ED9E02EAB32E29 /* Frameworks */ = {
@@ -42,6 +69,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FF020002A2B3C4D5E6F7A8B9 /* Frameworks (ext) */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FF010006A2B3C4D5E6F7A8B9 /* kerr_ios.xcframework in Frameworks (ext) */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -49,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				1688D808437D7CCDE2806867 /* KerrApp.app */,
+				FF010008A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -66,6 +102,7 @@
 			children = (
 				72C63E6E21F3513EFC600758 /* Generated */,
 				D31598521BB6F36DDA9881E0 /* KerrApp */,
+				FF030001A2B3C4D5E6F7A8B9 /* NetworkExtension */,
 				D5A12EC957F8928DBC48633F /* Frameworks */,
 				333296F6B7450FF2B7CF785C /* Products */,
 			);
@@ -81,8 +118,20 @@
 				6CAFE363E016F9C9FCED3481 /* KerrApp.swift */,
 				CBAFB32523E04459E44E3B56 /* QRScannerView.swift */,
 				11EE9A3CE4AC20D2F4EADF16 /* TerminalView.swift */,
+				FF010002A2B3C4D5E6F7A8B9 /* VpnView.swift */,
+				FF01000AA2B3C4D5E6F7A8B9 /* KerrApp.entitlements */,
 			);
 			path = KerrApp;
+			sourceTree = "<group>";
+		};
+		FF030001A2B3C4D5E6F7A8B9 /* NetworkExtension */ = {
+			isa = PBXGroup;
+			children = (
+				FF010004A2B3C4D5E6F7A8B9 /* PacketTunnelProvider.swift */,
+				FF010009A2B3C4D5E6F7A8B9 /* NetworkExtension-Info.plist */,
+				FF01000BA2B3C4D5E6F7A8B9 /* NetworkExtension.entitlements */,
+			);
+			path = NetworkExtension;
 			sourceTree = "<group>";
 		};
 		D5A12EC957F8928DBC48633F /* Frameworks */ = {
@@ -102,10 +151,12 @@
 			buildPhases = (
 				05FD0C112B16AA7DDB5651C5 /* Sources */,
 				4E7A1513C4ED9E02EAB32E29 /* Frameworks */,
+				FF020001A2B3C4D5E6F7A8B9 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				FF040001A2B3C4D5E6F7A8B9 /* PBXTargetDependency */,
 			);
 			name = KerrApp;
 			packageProductDependencies = (
@@ -115,7 +166,41 @@
 			productReference = 1688D808437D7CCDE2806867 /* KerrApp.app */;
 			productType = "com.apple.product-type.application";
 		};
+		FF040002A2B3C4D5E6F7A8B9 /* KerrNetworkExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FF040003A2B3C4D5E6F7A8B9 /* Build configuration list for PBXNativeTarget "KerrNetworkExtension" */;
+			buildPhases = (
+				FF040004A2B3C4D5E6F7A8B9 /* Sources */,
+				FF020002A2B3C4D5E6F7A8B9 /* Frameworks (ext) */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = KerrNetworkExtension;
+			productName = KerrNetworkExtension;
+			productReference = FF010008A2B3C4D5E6F7A8B9 /* KerrNetworkExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXTargetDependency section */
+		FF040001A2B3C4D5E6F7A8B9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FF040002A2B3C4D5E6F7A8B9 /* KerrNetworkExtension */;
+			targetProxy = FF040005A2B3C4D5E6F7A8B9 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		FF040005A2B3C4D5E6F7A8B9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D93556D7C663665F9A87C791 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FF040002A2B3C4D5E6F7A8B9;
+			remoteInfo = KerrNetworkExtension;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXProject section */
 		D93556D7C663665F9A87C791 /* Project object */ = {
@@ -142,6 +227,7 @@
 			projectRoot = "";
 			targets = (
 				AFA0A8360C35DA6FC3C170B5 /* KerrApp */,
+				FF040002A2B3C4D5E6F7A8B9 /* KerrNetworkExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -159,6 +245,16 @@
 				BA33EC4A048694675CA4BA9E /* QRScannerView.swift in Sources */,
 				0D21BE15EDF1C4C260EC91E8 /* TerminalView.swift in Sources */,
 				7B6748EDB3281BFDD7541565 /* kerr_ios.swift in Sources */,
+				FF010001A2B3C4D5E6F7A8B9 /* VpnView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FF040004A2B3C4D5E6F7A8B9 /* Sources (ext) */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FF010005A2B3C4D5E6F7A8B9 /* kerr_ios.swift in Sources (ext) */,
+				FF010003A2B3C4D5E6F7A8B9 /* PacketTunnelProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -169,6 +265,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = KerrApp/KerrApp.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 8HT9SU67L8;
@@ -325,6 +422,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = KerrApp/KerrApp.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 8HT9SU67L8;
@@ -359,6 +457,86 @@
 			};
 			name = Release;
 		};
+		/* ── KerrNetworkExtension build configurations ── */
+		FF050001A2B3C4D5E6F7A8B9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NetworkExtension/NetworkExtension.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 8HT9SU67L8;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Generated";
+				INFOPLIST_FILE = NetworkExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kerr.app.NetworkExtension;
+				PRODUCT_NAME = KerrNetworkExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/Generated/kerr_iosFFI.h";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FF050002A2B3C4D5E6F7A8B9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NetworkExtension/NetworkExtension.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 8HT9SU67L8;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Generated";
+				INFOPLIST_FILE = NetworkExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kerr.app.NetworkExtension;
+				PRODUCT_NAME = KerrNetworkExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/Generated/kerr_iosFFI.h";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -376,6 +554,15 @@
 			buildConfigurations = (
 				4CA153AE4C675866115BA1CD /* Debug */,
 				F0A2631BBC155A0AC3B61021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FF040003A2B3C4D5E6F7A8B9 /* Build configuration list for PBXNativeTarget "KerrNetworkExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FF050001A2B3C4D5E6F7A8B9 /* Debug */,
+				FF050002A2B3C4D5E6F7A8B9 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::{KerrError, FileBrowser, ShellSession, ShellCallback};
+use crate::{KerrError, FileBrowser, ShellSession, ShellCallback, VpnTunnel};
 
 pub struct Session {
     conn: Arc<iroh::endpoint::Connection>,
@@ -76,6 +76,22 @@ impl Session {
         let runtime = crate::get_runtime();
         runtime.block_on(async {
             *self.connected.lock().await
+        })
+    }
+
+    /// Start a SOCKS5-based VPN tunnel that forwards all TCP connections
+    /// through the existing Iroh TcpRelay session.
+    ///
+    /// - `socks_port`: local port for the SOCKS5 server (0 = auto-assign)
+    /// - `handle_udp`: reserved for future DNS relay support; pass false for now
+    pub fn start_vpn(
+        self: Arc<Self>,
+        socks_port: u16,
+        handle_udp: bool,
+    ) -> Result<Arc<VpnTunnel>, KerrError> {
+        let runtime = crate::get_runtime();
+        runtime.block_on(async {
+            VpnTunnel::new(Arc::clone(&self.conn), socks_port, handle_udp).await
         })
     }
 }

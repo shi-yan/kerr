@@ -40,6 +40,12 @@ interface Session {
     [Throws=KerrError]
     ShellSession start_shell(ShellCallback callback);
 
+    // Start a SOCKS5-based VPN tunnel that routes all TCP connections
+    // through the Iroh TcpRelay.  Pass socks_port=0 to auto-assign a port.
+    // handle_udp is reserved for future DNS relay support.
+    [Throws=KerrError]
+    VpnTunnel start_vpn(u16 socks_port, boolean handle_udp);
+
     // Disconnect from the remote server
     void disconnect();
 
@@ -115,4 +121,14 @@ dictionary FileMetadata {
     u64? created_timestamp;  // Unix timestamp in seconds
     u64? modified_timestamp; // Unix timestamp in seconds
     boolean is_dir;
+};
+
+// A running SOCKS5 VPN tunnel backed by the Iroh TcpRelay.
+// Created via Session.start_vpn().
+interface VpnTunnel {
+    // Returns the local port the SOCKS5 server is bound to.
+    u16 get_socks_port();
+
+    // Shut down the SOCKS5 server and close the relay stream.
+    void stop();
 };

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  KerrApp.entitlements — Main app entitlements
+
+  IMPORTANT: Before building, enable these capabilities in the Apple Developer
+  Portal (developer.apple.com) under your App ID:
+    1. Network Extensions → Packet Tunnel Provider
+    2. App Groups → group.com.kerr.app
+
+  Then download the updated provisioning profiles.
+-->
+<plist version="1.0">
+<dict>
+	<!-- Allows the app to install and manage VPN profiles -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+	<!-- Shared storage between the main app and the Network Extension -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.kerr.app</string>
+	</array>
+</dict>
+</plist>
