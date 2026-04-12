@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  NetworkExtension.entitlements — Packet Tunnel Provider extension
+
+  IMPORTANT: These must match the entitlements registered in the Apple
+  Developer Portal for bundle ID com.kerr.app.NetworkExtension.
+-->
+<plist version="1.0">
+<dict>
+	<!-- Required for a Packet Tunnel Provider extension -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+	<!-- Shared storage with the main app (to read the connection string) -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.kerr.app</string>
+	</array>
+</dict>
+</plist>

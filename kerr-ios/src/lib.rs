@@ -11,12 +11,14 @@ mod endpoint;
 mod session;
 mod file_browser;
 mod shell;
+mod vpn;
 
 pub use types::*;
 pub use endpoint::*;
 pub use session::*;
 pub use file_browser::*;
 pub use shell::*;
+pub use vpn::*;
 
 // UniFFI will generate bindings from this
 uniffi::include_scaffolding!("kerr_ios");

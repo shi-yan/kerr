@@ -36,14 +36,21 @@ struct MainTabView: View {
             }
             .tag(1)
 
+            // ── VPN tab ──────────────────────────────────────────────────
+            VpnView(connectionManager: connectionManager)
+                .tabItem {
+                    Label("VPN", systemImage: "shield.fill")
+                }
+                .tag(2)
+
             Color.clear
                 .tabItem {
                     Label("Exit", systemImage: "xmark.circle")
                 }
-                .tag(2)
+                .tag(3)
         }
         .onChange(of: selectedTab) { newTab in
-            if newTab == 2 {
+            if newTab == 3 {
                 connectionManager.disconnect()
             }
         }
