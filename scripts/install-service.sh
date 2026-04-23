@@ -7,10 +7,13 @@
 #        ~/.config/kerr/autostart.json  →  { "register": "your-alias" }
 #
 # Usage:
-#   ./scripts/install-service.sh [--name <alias>] [--binary <path>]
+#   ./scripts/install-service.sh [--name <alias>] [--from local|github] [--binary <path>]
 #   ./scripts/install-service.sh --help
 
 set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+GITHUB_REPO="https://github.com/shi-yan/kerr"
 
 # ── Config paths ───────────────────────────────────────────────────────────────
 KERR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kerr"
@@ -52,6 +55,7 @@ PYEOF
 
 # ── Parse arguments ────────────────────────────────────────────────────────────
 REGISTER_NAME=""
+INSTALL_FROM="local"   # local | github
 KERR_BIN_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -61,6 +65,15 @@ while [[ $# -gt 0 ]]; do
             REGISTER_NAME="$2"; shift 2;;
         --name=*)
             REGISTER_NAME="${1#--name=}"; shift;;
+        --from)
+            [[ $# -ge 2 ]] || die "--from requires an argument: local or github."
+            INSTALL_FROM="$2"; shift 2
+            [[ "$INSTALL_FROM" == "local" || "$INSTALL_FROM" == "github" ]] \
+                || die "--from must be 'local' or 'github', got '$INSTALL_FROM'.";;
+        --from=*)
+            INSTALL_FROM="${1#--from=}"; shift
+            [[ "$INSTALL_FROM" == "local" || "$INSTALL_FROM" == "github" ]] \
+                || die "--from must be 'local' or 'github', got '$INSTALL_FROM'.";;
         --binary)
             [[ $# -ge 2 ]] || die "--binary requires an argument."
             KERR_BIN_OVERRIDE="$2"; shift 2;;
@@ -80,10 +93,16 @@ Prerequisites:
      Contents: { "register": "your-alias" }
 
 Options:
-  --name <alias>   Registration alias passed to 'kerr serve --register'.
-                   Takes precedence over the autostart config file.
-  --binary <path>  Path to the kerr binary (auto-detected if not set).
-  -h, --help       Show this help message.
+  --from local      Use an already-installed kerr binary (default).
+                    Searches PATH, ~/.cargo/bin, ~/.local/bin, /usr/local/bin.
+  --from github     Install kerr from GitHub before setting up the service:
+                      cargo install --git https://github.com/shi-yan/kerr
+                    Requires cargo (install via https://rustup.rs).
+  --name <alias>    Registration alias passed to 'kerr serve --register'.
+                    Takes precedence over the autostart config file.
+  --binary <path>   Explicit path to the kerr binary. Skips binary search and
+                    --from logic entirely.
+  -h, --help        Show this help message.
 
 After installation:
   Status     : systemctl --user status kerr
@@ -103,16 +122,30 @@ done
 command -v systemctl >/dev/null 2>&1 \
     || die "systemd is not available on this system. Cannot install a service."
 
-# ── Preflight: kerr binary ─────────────────────────────────────────────────────
+# ── Resolve kerr binary ────────────────────────────────────────────────────────
 if [[ -n "$KERR_BIN_OVERRIDE" ]]; then
+    # Explicit path always wins, regardless of --from.
     KERR_BIN="$KERR_BIN_OVERRIDE"
     [[ -x "$KERR_BIN" ]] \
         || die "Specified binary is not executable: $KERR_BIN"
+
+elif [[ "$INSTALL_FROM" == "github" ]]; then
+    command -v cargo >/dev/null 2>&1 \
+        || die "cargo is required for --from github but was not found in PATH.
+       Install Rust/cargo: https://rustup.rs"
+    echo "Installing kerr from GitHub ($GITHUB_REPO)..."
+    cargo install --git "$GITHUB_REPO" --locked
+    KERR_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/kerr"
+    [[ -x "$KERR_BIN" ]] \
+        || die "cargo install appeared to succeed but binary not found at $KERR_BIN"
+    info "Installed: $KERR_BIN"
+
 else
+    # local: search PATH and common install locations.
     KERR_BIN=""
     for candidate in \
         "$(command -v kerr 2>/dev/null || true)" \
-        "$HOME/.cargo/bin/kerr" \
+        "${CARGO_HOME:-$HOME/.cargo}/bin/kerr" \
         "$HOME/.local/bin/kerr" \
         "/usr/local/bin/kerr"; do
         if [[ -n "$candidate" && -x "$candidate" ]]; then
@@ -121,7 +154,7 @@ else
         fi
     done
     [[ -n "$KERR_BIN" ]] \
-        || die "Cannot find 'kerr' binary. Build it, install it, or pass --binary <path>."
+        || die "Cannot find 'kerr' binary. Build and install it, or use --from github."
 fi
 
 # ── Preflight: user login ──────────────────────────────────────────────────────
