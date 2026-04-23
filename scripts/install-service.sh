@@ -19,6 +19,12 @@ AUTOSTART_CONFIG="$KERR_CONFIG_DIR/autostart.json"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE_FILE="$SYSTEMD_USER_DIR/kerr.service"
 
+# XDG state dir is the correct location for persistent log files from a user
+# service (as opposed to XDG_CONFIG_HOME for config or XDG_CACHE_HOME for
+# transient data).  Falls back to ~/.local/state when XDG_STATE_HOME is unset.
+KERR_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/kerr"
+KERR_LOG_FILE="$KERR_LOG_DIR/server.log"
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "  $*"; }
@@ -80,11 +86,12 @@ Options:
   -h, --help       Show this help message.
 
 After installation:
-  Status  : systemctl --user status kerr
-  Logs    : journalctl --user -u kerr -f
-  Stop    : systemctl --user stop kerr
-  Disable : systemctl --user disable kerr
-  Remove  : ./scripts/uninstall-service.sh
+  Status     : systemctl --user status kerr
+  Live logs  : journalctl --user -u kerr -f
+  Log file   : ~/.local/state/kerr/server.log  (or $XDG_STATE_HOME/kerr/)
+  Stop       : systemctl --user stop kerr
+  Disable    : systemctl --user disable kerr
+  Remove     : ./scripts/uninstall-service.sh
 HELP
             exit 0;;
         *)
@@ -142,6 +149,7 @@ fi
 
 # ── Write systemd unit file ────────────────────────────────────────────────────
 mkdir -p "$SYSTEMD_USER_DIR"
+mkdir -p "$KERR_LOG_DIR"
 
 cat > "$SERVICE_FILE" <<UNIT
 [Unit]
@@ -151,7 +159,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$KERR_BIN serve --register $REGISTER_NAME
+ExecStart=$KERR_BIN serve --register $REGISTER_NAME --log $KERR_LOG_FILE
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -162,6 +170,7 @@ WantedBy=default.target
 UNIT
 
 info "Service file written: $SERVICE_FILE"
+info "Log file location  : $KERR_LOG_FILE"
 
 # ── Enable linger so service starts at boot, not just on login ─────────────────
 if loginctl enable-linger "$(id -un)" 2>/dev/null; then
@@ -180,9 +189,11 @@ systemctl --user start  kerr.service
 
 echo ""
 echo "Kerr service installed and started."
-echo "  Alias   : $REGISTER_NAME"
-echo "  Binary  : $KERR_BIN"
-echo "  Status  : systemctl --user status kerr"
-echo "  Logs    : journalctl --user -u kerr -f"
-echo "  Stop    : systemctl --user stop kerr"
-echo "  Remove  : $(dirname "$0")/uninstall-service.sh"
+echo "  Alias      : $REGISTER_NAME"
+echo "  Binary     : $KERR_BIN"
+echo "  Log file   : $KERR_LOG_FILE"
+echo "  Status     : systemctl --user status kerr"
+echo "  Live logs  : journalctl --user -u kerr -f"
+echo "  Log file   : tail -f $KERR_LOG_FILE"
+echo "  Stop       : systemctl --user stop kerr"
+echo "  Remove     : $(dirname "$0")/uninstall-service.sh"
