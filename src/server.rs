@@ -7,7 +7,7 @@ use iroh::{
 };
 use n0_snafu::{Result, ResultExt};
 use std::sync::Arc;
-use std::io::Write as IoWrite;
+use std::io::{IsTerminal, Write as IoWrite};
 use std::path::Path;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{ClientMessage, ServerMessage, ALPN};
@@ -110,140 +110,153 @@ pub async fn run_server(register_alias: Option<String>, session_path: Option<Str
     println!("Keys: [c]onnect | [s]end | [p]ull | [b]rowse | [r]elay | p[i]ng | Ctrl+C");
     println!("─────────────────────────────────────────────────────────────────\n");
 
-    // Enable raw mode for keyboard event handling
-    enable_raw_mode().unwrap_or_else(|err| eprintln!("Failed to enable raw mode: {err}"));
+    // When stdin is not a TTY (e.g. launched as a systemd service), skip all
+    // keyboard/clipboard interaction — the EventStream would spin on EOF and
+    // the raw-mode calls have no meaning without a terminal.
+    if std::io::stdin().is_terminal() {
+        // Enable raw mode for keyboard event handling
+        enable_raw_mode().unwrap_or_else(|err| eprintln!("Failed to enable raw mode: {err}"));
 
-    // Spawn task to handle keyboard events
-    let connect_clone = connect_command.clone();
-    let send_clone = send_command.clone();
-    let pull_clone = pull_command.clone();
-    let browse_clone = browse_command.clone();
-    let relay_clone = relay_command.clone();
-    let ping_clone = ping_command.clone();
+        // Spawn task to handle keyboard events
+        let connect_clone = connect_command.clone();
+        let send_clone = send_command.clone();
+        let pull_clone = pull_command.clone();
+        let browse_clone = browse_command.clone();
+        let relay_clone = relay_command.clone();
+        let ping_clone = ping_command.clone();
 
-    let keyboard_task = tokio::task::spawn(async move {
-        let mut event_stream = EventStream::new();
+        let keyboard_task = tokio::task::spawn(async move {
+            let mut event_stream = EventStream::new();
 
-        loop {
-            if let Some(event_result) = event_stream.next().await {
-                match event_result {
-                    Ok(Event::Key(key_event)) => {
-                        match (key_event.code, key_event.modifiers, key_event.kind) {
-                            // Handle 'c' key press to copy connect command
-                            (KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&connect_clone).is_ok() {
-                                            println!("\r\n✓ Connect command copied to clipboard!\r\n");
-                                        } else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+            loop {
+                if let Some(event_result) = event_stream.next().await {
+                    match event_result {
+                        Ok(Event::Key(key_event)) => {
+                            match (key_event.code, key_event.modifiers, key_event.kind) {
+                                // Handle 'c' key press to copy connect command
+                                (KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&connect_clone).is_ok() {
+                                                println!("\r\n✓ Connect command copied to clipboard!\r\n");
+                                            } else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        }
                                     }
                                 }
-                            }
-                            // Handle 's' key press to copy send command
-                            (KeyCode::Char('s'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&send_clone).is_ok() {
-                                            println!("\r\n✓ Send command copied to clipboard!\r\n");
-                                        } else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                // Handle 's' key press to copy send command
+                                (KeyCode::Char('s'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&send_clone).is_ok() {
+                                                println!("\r\n✓ Send command copied to clipboard!\r\n");
+                                            } else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        }
                                     }
                                 }
-                            }
-                            // Handle 'p' key press to copy pull command
-                            (KeyCode::Char('p'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&pull_clone).is_ok() {
-                                            println!("\r\n✓ Pull command copied to clipboard!\r\n");
-                                        } else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                // Handle 'p' key press to copy pull command
+                                (KeyCode::Char('p'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&pull_clone).is_ok() {
+                                                println!("\r\n✓ Pull command copied to clipboard!\r\n");
+                                            } else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        }
                                     }
                                 }
-                            }
-                            // Handle 'b' key press to copy browse command
-                            (KeyCode::Char('b'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&browse_clone).is_ok() {
-                                            println!("\r\n✓ Browse command copied to clipboard!\r\n");
-                                        } else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                // Handle 'b' key press to copy browse command
+                                (KeyCode::Char('b'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&browse_clone).is_ok() {
+                                                println!("\r\n✓ Browse command copied to clipboard!\r\n");
+                                            } else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
+                                        }
                                     }
                                 }
-                            }
-                            // Handle 'r' key press to copy relay command
-                            (KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&relay_clone).is_ok() {
-                                            println!("\r\n✓ Relay command copied to clipboard!\r\n");
+                                // Handle 'r' key press to copy relay command
+                                (KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&relay_clone).is_ok() {
+                                                println!("\r\n✓ Relay command copied to clipboard!\r\n");
+                                            }
+                                            else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
                                         }
-                                        else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
                                     }
                                 }
-                            }
-                            // Handle 'i' key press to copy ping command
-                            (KeyCode::Char('i'), KeyModifiers::NONE, KeyEventKind::Press) => {
-                                match Clipboard::new() {
-                                    Ok(mut clipboard) => {
-                                        if clipboard.set_text(&ping_clone).is_ok() {
-                                            println!("\r\n✓ Ping command copied to clipboard!\r\n");
-                                        } else {
-                                            eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                // Handle 'i' key press to copy ping command
+                                (KeyCode::Char('i'), KeyModifiers::NONE, KeyEventKind::Press) => {
+                                    match Clipboard::new() {
+                                        Ok(mut clipboard) => {
+                                            if clipboard.set_text(&ping_clone).is_ok() {
+                                                println!("\r\n✓ Ping command copied to clipboard!\r\n");
+                                            } else {
+                                                eprintln!("\r\n✗ Failed to copy to clipboard\r\n");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        eprintln!("\r\n✗ Failed to access clipboard: {}\r\n", e);
-                                    }
                                 }
+                                // Handle Ctrl+C to exit
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL, KeyEventKind::Press) => {
+                                    break;
+                                }
+                                _ => {}
                             }
-                            // Handle Ctrl+C to exit
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL, KeyEventKind::Press) => {
-                                break;
-                            }
-                            _ => {}
                         }
+                        Err(e) => {
+                            eprintln!("Failed to process event: {}", e);
+                        }
+                        _ => {}
                     }
-                    Err(e) => {
-                        eprintln!("Failed to process event: {}", e);
-                    }
-                    _ => {}
                 }
             }
-        }
-    });
+        });
 
-    // Wait for either Ctrl+C signal or keyboard task to complete
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            println!("\r\nShutting down...");
+        // Wait for either Ctrl+C signal or keyboard task to complete
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\r\nShutting down...");
+            }
+            _ = keyboard_task => {
+                println!("\r\nShutting down...");
+            }
         }
-        _ = keyboard_task => {
-            println!("\r\nShutting down...");
-        }
+
+        disable_raw_mode().unwrap_or_else(|e| eprintln!("Failed to disable raw mode: {}", e));
+    } else {
+        // Headless mode (no TTY): running as a systemd service or piped process.
+        // Just wait for SIGINT; keyboard shortcuts are not available.
+        tracing::info!(pid = std::process::id(), "Running headless — waiting for SIGINT to stop");
+        tokio::signal::ctrl_c().await.ok();
+        println!("Shutting down...");
     }
 
     // Unregister from backend if we registered
@@ -257,9 +270,6 @@ pub async fn run_server(register_alias: Option<String>, session_path: Option<Str
             }
         }
     }
-
-    // Disable raw mode before exiting
-    disable_raw_mode().unwrap_or_else(|e| eprintln!("Failed to disable raw mode: {}", e));
 
     // Shutdown the router
     router.shutdown().await.e()?;

@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# install-service.sh — Register `kerr serve` as a systemd user service.
+#
+# Prerequisites:
+#   1. Run `kerr login` at least once so a session exists.
+#   2. Either pass --name <alias> OR create the autostart config file:
+#        ~/.config/kerr/autostart.json  →  { "register": "your-alias" }
+#
+# Usage:
+#   ./scripts/install-service.sh [--name <alias>] [--from local|github] [--binary <path>]
+#   ./scripts/install-service.sh --help
+#
+# Rerunning this script updates the service: the binary is re-resolved, the
+# unit file is overwritten, and a running service is restarted in-place.
+
+set -euo pipefail
+
+# ── Locate repo root (script lives in <repo>/scripts/) ────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+GITHUB_REPO="https://github.com/shi-yan/kerr"
+
+# ── Config paths ───────────────────────────────────────────────────────────────
+KERR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kerr"
+SESSION_FILE="$KERR_CONFIG_DIR/session.json"
+AUTOSTART_CONFIG="$KERR_CONFIG_DIR/autostart.json"
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_FILE="$SYSTEMD_USER_DIR/kerr.service"
+
+# XDG state dir is the correct location for persistent log files from a user
+# service (as opposed to XDG_CONFIG_HOME for config or XDG_CACHE_HOME for
+# transient data).  Falls back to ~/.local/state when XDG_STATE_HOME is unset.
+KERR_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/kerr"
+KERR_LOG_FILE="$KERR_LOG_DIR/server.log"
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+die()  { echo "Error: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+json_field() {
+    # json_field <file> <key>  — extract a top-level string value without jq
+    local file="$1" key="$2" value=""
+    if command -v python3 >/dev/null 2>&1; then
+        value=$(python3 - "$file" "$key" <<'PYEOF'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    print(data.get(sys.argv[2], ""))
+except Exception:
+    print("")
+PYEOF
+        )
+    else
+        # Fallback: basic grep-based extraction (no nested objects)
+        value=$(grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" "$file" \
+            | sed 's/.*":\s*"\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    printf '%s' "$value"
+}
+
+# ── Parse arguments ────────────────────────────────────────────────────────────
+REGISTER_NAME=""
+INSTALL_FROM="local"   # local | github
+KERR_BIN_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)
+            [[ $# -ge 2 ]] || die "--name requires an argument."
+            REGISTER_NAME="$2"; shift 2;;
+        --name=*)
+            REGISTER_NAME="${1#--name=}"; shift;;
+        --from)
+            [[ $# -ge 2 ]] || die "--from requires an argument: local or github."
+            INSTALL_FROM="$2"; shift 2
+            [[ "$INSTALL_FROM" == "local" || "$INSTALL_FROM" == "github" ]] \
+                || die "--from must be 'local' or 'github', got '$INSTALL_FROM'.";;
+        --from=*)
+            INSTALL_FROM="${1#--from=}"; shift
+            [[ "$INSTALL_FROM" == "local" || "$INSTALL_FROM" == "github" ]] \
+                || die "--from must be 'local' or 'github', got '$INSTALL_FROM'.";;
+        --binary)
+            [[ $# -ge 2 ]] || die "--binary requires an argument."
+            KERR_BIN_OVERRIDE="$2"; shift 2;;
+        --binary=*)
+            KERR_BIN_OVERRIDE="${1#--binary=}"; shift;;
+        -h|--help)
+            cat <<'HELP'
+Usage: install-service.sh [OPTIONS]
+
+Register 'kerr serve --register <alias>' as a systemd user service that
+auto-starts on machine boot.
+
+Prerequisites:
+  1. Run 'kerr login' first to create a valid session.
+  2. Provide the registration alias via --name or in the autostart config:
+       ~/.config/kerr/autostart.json
+     Contents: { "register": "your-alias" }
+
+Options:
+  --from local      Use the local build from the repo (default).
+                    Search order: target/release/kerr → target/debug/kerr →
+                    PATH → ~/.cargo/bin → ~/.local/bin → /usr/local/bin.
+                    Rerun after `cargo build --release` to update the service.
+  --from github     Install from GitHub then set up the service:
+                      cargo install --git https://github.com/shi-yan/kerr
+                    Requires cargo (install via https://rustup.rs).
+                    Rerun to upgrade to the latest commit on the default branch.
+  --name <alias>    Registration alias passed to 'kerr serve --register'.
+                    Takes precedence over the autostart config file.
+  --binary <path>   Explicit path to the kerr binary. Skips binary search and
+                    --from logic entirely.
+  -h, --help        Show this help message.
+
+After installation:
+  Status     : systemctl --user status kerr
+  Live logs  : journalctl --user -u kerr -f
+  Log file   : ~/.local/state/kerr/server.log  (or $XDG_STATE_HOME/kerr/)
+  Stop       : systemctl --user stop kerr
+  Disable    : systemctl --user disable kerr
+  Remove     : ./scripts/uninstall-service.sh
+HELP
+            exit 0;;
+        *)
+            die "Unknown argument: '$1'. Run with --help for usage.";;
+    esac
+done
+
+# ── Preflight: systemd ─────────────────────────────────────────────────────────
+command -v systemctl >/dev/null 2>&1 \
+    || die "systemd is not available on this system. Cannot install a service."
+
+# ── Resolve kerr binary ────────────────────────────────────────────────────────
+if [[ -n "$KERR_BIN_OVERRIDE" ]]; then
+    # Explicit path always wins, regardless of --from.
+    KERR_BIN="$KERR_BIN_OVERRIDE"
+    [[ -x "$KERR_BIN" ]] \
+        || die "Specified binary is not executable: $KERR_BIN"
+
+elif [[ "$INSTALL_FROM" == "github" ]]; then
+    command -v cargo >/dev/null 2>&1 \
+        || die "cargo is required for --from github but was not found in PATH.
+       Install Rust/cargo: https://rustup.rs"
+    echo "Installing kerr from GitHub ($GITHUB_REPO)..."
+    cargo install --git "$GITHUB_REPO" --locked
+    KERR_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/kerr"
+    [[ -x "$KERR_BIN" ]] \
+        || die "cargo install appeared to succeed but binary not found at $KERR_BIN"
+    info "Installed: $KERR_BIN"
+
+else
+    # local: prefer the repo's own build artifacts, then fall back to system
+    # locations for cases where kerr was installed separately.
+    KERR_BIN=""
+    for candidate in \
+        "$REPO_ROOT/target/release/kerr" \
+        "$REPO_ROOT/target/debug/kerr" \
+        "$(command -v kerr 2>/dev/null || true)" \
+        "${CARGO_HOME:-$HOME/.cargo}/bin/kerr" \
+        "$HOME/.local/bin/kerr" \
+        "/usr/local/bin/kerr"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            KERR_BIN="$candidate"
+            break
+        fi
+    done
+    [[ -n "$KERR_BIN" ]] \
+        || die "No kerr binary found. Run 'cargo build --release' first, or use --from github."
+fi
+
+# Normalise to an absolute, symlink-resolved path so the unit file and the
+# printed summary always show exactly what systemd will execute.
+KERR_BIN="$(realpath "$KERR_BIN" 2>/dev/null \
+    || readlink -f "$KERR_BIN" 2>/dev/null \
+    || echo "$KERR_BIN")"
+info "Binary resolved    : $KERR_BIN"
+
+# ── Preflight: user login ──────────────────────────────────────────────────────
+[[ -f "$SESSION_FILE" ]] \
+    || die "Not logged in. Run 'kerr login' first, then re-run this script."
+
+SESSION_ID="$(json_field "$SESSION_FILE" "session_id")"
+[[ -n "$SESSION_ID" ]] \
+    || die "Session file exists but has no valid session_id. Run 'kerr login' again."
+
+# ── Resolve registration alias ─────────────────────────────────────────────────
+if [[ -z "$REGISTER_NAME" ]]; then
+    if [[ ! -f "$AUTOSTART_CONFIG" ]]; then
+        die "No registration alias provided and no autostart config found.
+       Either:
+         1. Pass:  --name <your-alias>
+         2. Create $AUTOSTART_CONFIG with:
+              { \"register\": \"your-alias\" }"
+    fi
+
+    REGISTER_NAME="$(json_field "$AUTOSTART_CONFIG" "register")"
+    [[ -n "$REGISTER_NAME" ]] \
+        || die "Key 'register' is missing or empty in $AUTOSTART_CONFIG"
+fi
+
+# ── Write systemd unit file ────────────────────────────────────────────────────
+mkdir -p "$SYSTEMD_USER_DIR"
+mkdir -p "$KERR_LOG_DIR"
+
+cat > "$SERVICE_FILE" <<UNIT
+[Unit]
+Description=Kerr P2P Remote Shell Server
+Documentation=https://github.com/shi-yan/kerr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$KERR_BIN serve --register $REGISTER_NAME --log $KERR_LOG_FILE
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+UNIT
+
+info "Service file written: $SERVICE_FILE"
+info "Log file location  : $KERR_LOG_FILE"
+
+# ── Enable linger so service starts at boot, not just on login ─────────────────
+if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+    info "Linger enabled for user '$(id -un)' — service will start at boot."
+else
+    echo ""
+    echo "Warning: Could not enable linger. The service will only start when you log in,"
+    echo "         not automatically at machine boot."
+    echo "         To fix: sudo loginctl enable-linger $(id -un)"
+fi
+
+# ── Activate the service (restart if already running, start if fresh) ──────────
+systemctl --user daemon-reload
+systemctl --user enable kerr.service
+if systemctl --user is-active --quiet kerr.service 2>/dev/null; then
+    systemctl --user restart kerr.service
+    ACTIVATED="restarted"
+else
+    systemctl --user start kerr.service
+    ACTIVATED="started"
+fi
+
+echo ""
+echo "Kerr service installed and $ACTIVATED."
+echo "  Alias      : $REGISTER_NAME"
+echo "  Binary     : $KERR_BIN"
+echo "  Log file   : $KERR_LOG_FILE"
+echo "  Status     : systemctl --user status kerr"
+echo "  Live logs  : journalctl --user -u kerr -f"
+echo "  Log file   : tail -f $KERR_LOG_FILE"
+echo "  Stop       : systemctl --user stop kerr"
+echo "  Remove     : $(dirname "$0")/uninstall-service.sh"
