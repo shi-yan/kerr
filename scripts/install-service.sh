@@ -170,6 +170,13 @@ else
         || die "No kerr binary found. Run 'cargo build --release' first, or use --from github."
 fi
 
+# Normalise to an absolute, symlink-resolved path so the unit file and the
+# printed summary always show exactly what systemd will execute.
+KERR_BIN="$(realpath "$KERR_BIN" 2>/dev/null \
+    || readlink -f "$KERR_BIN" 2>/dev/null \
+    || echo "$KERR_BIN")"
+info "Binary resolved    : $KERR_BIN"
+
 # ── Preflight: user login ──────────────────────────────────────────────────────
 [[ -f "$SESSION_FILE" ]] \
     || die "Not logged in. Run 'kerr login' first, then re-run this script."
