@@ -9,8 +9,15 @@
 # Usage:
 #   ./scripts/install-service.sh [--name <alias>] [--from local|github] [--binary <path>]
 #   ./scripts/install-service.sh --help
+#
+# Rerunning this script updates the service: the binary is re-resolved, the
+# unit file is overwritten, and a running service is restarted in-place.
 
 set -euo pipefail
+
+# ── Locate repo root (script lives in <repo>/scripts/) ────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 GITHUB_REPO="https://github.com/shi-yan/kerr"
@@ -93,11 +100,14 @@ Prerequisites:
      Contents: { "register": "your-alias" }
 
 Options:
-  --from local      Use an already-installed kerr binary (default).
-                    Searches PATH, ~/.cargo/bin, ~/.local/bin, /usr/local/bin.
-  --from github     Install kerr from GitHub before setting up the service:
+  --from local      Use the local build from the repo (default).
+                    Search order: target/release/kerr → target/debug/kerr →
+                    PATH → ~/.cargo/bin → ~/.local/bin → /usr/local/bin.
+                    Rerun after `cargo build --release` to update the service.
+  --from github     Install from GitHub then set up the service:
                       cargo install --git https://github.com/shi-yan/kerr
                     Requires cargo (install via https://rustup.rs).
+                    Rerun to upgrade to the latest commit on the default branch.
   --name <alias>    Registration alias passed to 'kerr serve --register'.
                     Takes precedence over the autostart config file.
   --binary <path>   Explicit path to the kerr binary. Skips binary search and
@@ -141,9 +151,12 @@ elif [[ "$INSTALL_FROM" == "github" ]]; then
     info "Installed: $KERR_BIN"
 
 else
-    # local: search PATH and common install locations.
+    # local: prefer the repo's own build artifacts, then fall back to system
+    # locations for cases where kerr was installed separately.
     KERR_BIN=""
     for candidate in \
+        "$REPO_ROOT/target/release/kerr" \
+        "$REPO_ROOT/target/debug/kerr" \
         "$(command -v kerr 2>/dev/null || true)" \
         "${CARGO_HOME:-$HOME/.cargo}/bin/kerr" \
         "$HOME/.local/bin/kerr" \
@@ -154,7 +167,7 @@ else
         fi
     done
     [[ -n "$KERR_BIN" ]] \
-        || die "Cannot find 'kerr' binary. Build and install it, or use --from github."
+        || die "No kerr binary found. Run 'cargo build --release' first, or use --from github."
 fi
 
 # ── Preflight: user login ──────────────────────────────────────────────────────
@@ -215,13 +228,19 @@ else
     echo "         To fix: sudo loginctl enable-linger $(id -un)"
 fi
 
-# ── Activate the service ───────────────────────────────────────────────────────
+# ── Activate the service (restart if already running, start if fresh) ──────────
 systemctl --user daemon-reload
 systemctl --user enable kerr.service
-systemctl --user start  kerr.service
+if systemctl --user is-active --quiet kerr.service 2>/dev/null; then
+    systemctl --user restart kerr.service
+    ACTIVATED="restarted"
+else
+    systemctl --user start kerr.service
+    ACTIVATED="started"
+fi
 
 echo ""
-echo "Kerr service installed and started."
+echo "Kerr service installed and $ACTIVATED."
 echo "  Alias      : $REGISTER_NAME"
 echo "  Binary     : $KERR_BIN"
 echo "  Log file   : $KERR_LOG_FILE"
