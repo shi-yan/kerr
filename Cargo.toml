@@ -49,3 +49,8 @@ rkyv = "0.8"
 
 [build-dependencies]
 which = "8.0"
+
+[patch.crates-io]
+# ed25519-dalek 3.0.0-pre.1 uses pkcs8::Error::KeyMalformed as a unit variant,
+# but pkcs8 v0.11.0 changed it to KeyMalformed(KeyError). This local patch fixes that.
+ed25519-dalek = { path = "patches/ed25519-dalek" }
